@@ -54,8 +54,9 @@ def test_graph_walk_deduplicates():
     from sentence_transformers import SentenceTransformer
     embedder = SentenceTransformer("all-MiniLM-L6-v2")
     g = AssociationGraph()
-    g.add_node("a", embedder.encode("golden retriever dog"))
-    g.add_node("b", embedder.encode("dog named Max"))
+    # Use very similar sentences to guarantee auto-connect at 0.40 threshold
+    g.add_node("a", embedder.encode("the user has a dog named Max"))
+    g.add_node("b", embedder.encode("user owns a dog called Max"))
 
     # Both a and b are seeds — b is also a neighbour of a
     expanded = expand_via_graph(["a", "b"], g)
