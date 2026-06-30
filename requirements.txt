@@ -1,0 +1,19 @@
+torch>=2.1.0
+transformers>=4.40.0
+chromadb>=0.5.0
+networkx>=3.2
+numpy>=1.26.0
+scipy>=1.12.0
+sentence-transformers>=2.7.0
+soundfile>=0.12.0
+jiwer>=3.0.0
+fastapi>=0.110.0
+uvicorn>=0.29.0
+pydantic>=2.0.0
+pytest>=8.0.0
+pytest-mock>=3.12.0
+python-dotenv>=1.0.0
+# NeMo ASR — install separately on Colab:
+# pip install nemo_toolkit[asr]
+# Fish TTS — install separately on Colab:
+# pip install fish-speech (or clone their repo)
