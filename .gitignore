@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+venv/
+dist/
+build/
+*.egg
+
+# pytest
+.pytest_cache/
+.coverage
+
+# model weights (too large for git)
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# ChromaDB on-disk state
+chroma_data/
+memory_state/
+session_*/
+
+# Colab / Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
