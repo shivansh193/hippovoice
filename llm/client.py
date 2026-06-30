@@ -1,4 +1,7 @@
 from __future__ import annotations
+import re
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 class LLMClient:
@@ -58,7 +61,8 @@ class LLMClient:
 
         chat = [{"role": "system", "content": system}] + messages
         text = self.tokenizer.apply_chat_template(
-            chat, tokenize=False, add_generation_prompt=True
+            chat, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
         )
         inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
         input_len = inputs["input_ids"].shape[1]
@@ -72,7 +76,8 @@ class LLMClient:
             )
 
         new_tokens = output_ids[0][input_len:]
-        return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        text = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        return _THINK_RE.sub("", text).strip()
 
     def unload(self):
         """Free VRAM — call before loading STT or TTS on T4."""
