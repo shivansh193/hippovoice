@@ -24,7 +24,7 @@ class AssociationGraph:
     exceeds AUTO_CONNECT_THRESHOLD.
     """
 
-    AUTO_CONNECT_THRESHOLD = 0.55
+    AUTO_CONNECT_THRESHOLD = 0.40
 
     def __init__(self):
         self.graph = nx.Graph()
@@ -44,7 +44,7 @@ class AssociationGraph:
             if sim >= self.AUTO_CONNECT_THRESHOLD:
                 self.graph.add_edge(new_id, node_id, weight=round(sim, 4))
 
-    def get_neighbors(self, memory_id: str, min_weight: float = 0.55) -> list[str]:
+    def get_neighbors(self, memory_id: str, min_weight: float = 0.40) -> list[str]:
         if memory_id not in self.graph:
             return []
         return [
@@ -92,6 +92,9 @@ class MemoryStore:
         meta = {k: v for k, v in memory.items() if k != "content"}
         # ChromaDB metadata values must be str/int/float/bool — flatten emotion dict
         flat_meta = _flatten_meta(meta)
+        # ChromaDB rejects empty metadata dicts — ensure at least one field exists
+        if not flat_meta:
+            flat_meta = {"_type": "memory"}
 
         self._collection.add(
             ids=[memory_id],
