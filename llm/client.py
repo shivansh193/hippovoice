@@ -29,9 +29,9 @@ class LLMClient:
         self._backend = "mlx" if _IS_MAC else "transformers"
 
         if self._backend == "mlx":
-            self._init_mlx(model_name or "mlx-community/Qwen3-4B-4bit")
+            self._init_mlx(model_name or "mlx-community/Qwen3-0.6B-4bit")
         else:
-            self._init_transformers(model_name or "Qwen/Qwen3-4B", device, load_in_4bit)
+            self._init_transformers(model_name or "Qwen/Qwen3-0.6B", device, load_in_4bit)
 
     # ── MLX backend (Apple Silicon) ───────────────────────────────────────────
 

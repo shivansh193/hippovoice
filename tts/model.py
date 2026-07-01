@@ -1,35 +1,26 @@
 """
-TTS model loader for Fish Audio S2 Pro.
+TTS model loader — pyttsx3 (offline, zero download, works on Mac/Linux/Windows).
 
-Installation on Colab:
-    git clone https://github.com/fishaudio/fish-speech
-    cd fish-speech && pip install -e .
+pip install pyttsx3
 
-Or via HuggingFace:
-    pip install fish-speech  (unofficial package — verify before use)
-
-Model needs ~9GB VRAM (4B slow AR + 400M fast AR) in fp16 on A100.
+Upgrade path: swap load_tts() for kokoro-onnx, Coqui TTS, or Fish Speech
+when you need higher quality audio.
 """
 
 
-def load_fish_tts(model_path: str | None = None):
+def load_tts(rate: int = 175, volume: float = 1.0):
     """
-    Load Fish S2 Pro. Tries HuggingFace hub if no local path given.
-    Returns a model object with a .generate() method.
-    """
-    try:
-        # Attempt fish-speech package import (installed from their repo)
-        from fish_speech.models.text2semantic.llama import DualARTransformer
-        from fish_speech.inference import TTSInferenceEngine
+    Load pyttsx3 engine. Returns a configured engine instance.
 
-        engine = TTSInferenceEngine.from_pretrained(
-            model_path or "fishaudio/fish-speech-1.5"
-        )
-        return engine
-    except ImportError:
-        raise RuntimeError(
-            "Fish Speech not installed. On Colab:\n"
-            "  git clone https://github.com/fishaudio/fish-speech\n"
-            "  cd fish-speech && pip install -e .\n"
-            "Then restart the runtime."
-        )
+    rate:   words per minute (default 175)
+    volume: 0.0–1.0
+    """
+    import pyttsx3
+    engine = pyttsx3.init()
+    engine.setProperty("rate", rate)
+    engine.setProperty("volume", volume)
+    return engine
+
+
+# Alias used by voice pipeline cells
+load_fish_tts = load_tts
