@@ -1,5 +1,8 @@
 """
-Transcription and acoustic embedding extraction via Canary-Qwen 2.5B.
+Transcription and acoustic embedding extraction via Whisper.
+
+Whisper's encoder output (1500-frame, 384/512/768-dim depending on model size)
+is mean-pooled to produce a fixed-size acoustic embedding for prosody fusion.
 """
 
 import numpy as np
@@ -7,64 +10,34 @@ import numpy as np
 
 def transcribe(model, audio_path: str) -> str:
     """Return transcript string for a single audio file."""
-    output = model.transcribe([audio_path], batch_size=1)
-    if not output:
-        return ""
-    # NeMo returns Hypothesis objects or plain strings depending on version
-    result = output[0]
-    return result.text if hasattr(result, "text") else str(result)
+    result = model.transcribe(audio_path, fp16=False)
+    return result.get("text", "").strip()
 
 
 def extract_encoder_embedding(model, audio_path: str) -> np.ndarray:
     """
-    Run the FastConformer encoder on audio and return a mean-pooled 1280-dim vector.
+    Run Whisper's encoder on audio and return a mean-pooled embedding.
 
-    We hook into the encoder's output before the decoder to get acoustic
-    representations that carry prosodic information text transcription discards.
+    Shape: (n_audio_ctx, n_mels) → mean over time → (n_mels,)
+    Used for prosody-aware emotion fusion — variance of this vector correlates
+    with speech energy/pitch variation.
     """
     import torch
+    import whisper
 
-    # NeMo's preprocessor + encoder pipeline
-    device = next(model.parameters()).device
-
-    # Preprocess audio to mel features
-    processed, lengths = model.preprocessor(
-        input_signal=_load_audio_tensor(audio_path, device),
-        length=_get_audio_length(audio_path, device),
-    )
+    audio = whisper.load_audio(audio_path)
+    audio = whisper.pad_or_trim(audio)
+    mel = whisper.log_mel_spectrogram(audio).to(model.device)
 
     with torch.no_grad():
-        encoded, encoded_len = model.encoder(audio_signal=processed, length=lengths)
+        encoded = model.encoder(mel.unsqueeze(0))  # (1, n_ctx, n_state)
 
-    # encoded shape: (batch=1, time, dim=1280) — mean pool over time
-    embedding = encoded[0, :encoded_len[0], :].mean(dim=0).cpu().numpy()
-    return embedding.astype(np.float32)
+    embedding = encoded[0].mean(dim=0).cpu().numpy().astype(np.float32)
+    return embedding
 
 
 def transcribe_with_embedding(model, audio_path: str) -> tuple[str, np.ndarray]:
-    """Convenience wrapper: returns (transcript, 1280-dim acoustic embedding)."""
+    """Convenience wrapper: returns (transcript, acoustic_embedding)."""
     text = transcribe(model, audio_path)
     emb = extract_encoder_embedding(model, audio_path)
     return text, emb
-
-
-# ── helpers ──────────────────────────────────────────────────────────────────
-
-def _load_audio_tensor(audio_path: str, device):
-    import torch
-    import soundfile as sf
-
-    data, sr = sf.read(audio_path, dtype="float32")
-    if data.ndim > 1:
-        data = data.mean(axis=1)  # mono
-    # NeMo expects (batch, samples)
-    return torch.tensor(data, dtype=torch.float32, device=device).unsqueeze(0)
-
-
-def _get_audio_length(audio_path: str, device):
-    import torch
-    import soundfile as sf
-
-    info = sf.info(audio_path)
-    length = torch.tensor([info.frames], dtype=torch.long, device=device)
-    return length

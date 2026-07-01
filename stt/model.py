@@ -1,15 +1,22 @@
 """
-STT model loader for Canary-Qwen 2.5B.
+STT model loader — Whisper (lightweight, runs on CPU/MPS/CUDA).
 
-Requires NeMo: pip install nemo_toolkit[asr]
-Run on Colab A100 — model needs ~5GB VRAM in fp16.
+Default: whisper-tiny (~150MB, fast on CPU)
+Upgrade path: whisper-base, whisper-small, whisper-medium, whisper-large-v3
 """
 
 
-def load_canary():
-    """Load nvidia/canary-qwen-2.5b from HuggingFace via NeMo."""
-    from nemo.collections.asr.models import EncDecMultiTaskModel
+def load_whisper(model_size: str = "tiny"):
+    """
+    Load an OpenAI Whisper model.
 
-    model = EncDecMultiTaskModel.from_pretrained("nvidia/canary-qwen-2.5b")
+    pip install openai-whisper
+    """
+    import whisper
+    model = whisper.load_model(model_size)
     model.eval()
     return model
+
+
+# Alias used by voice pipeline cells
+load_canary = load_whisper
