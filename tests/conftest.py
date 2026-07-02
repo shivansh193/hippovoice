@@ -38,20 +38,41 @@ def mock_llm():
     def smart_generate(system, messages, max_tokens=512):
         user_content = messages[-1]["content"] if messages else ""
         user_lower = user_content.lower()
+        sys_l = system.lower()
+
+        # A-MEM-style note generation (keywords/tags/context) -- checked before the
+        # generic "memory" branch below since this system prompt also says "memory".
+        if "zettelkasten" in sys_l:
+            return json.dumps({
+                "keywords": [w.strip(".,!?") for w in user_content.split()[-6:-1]] or ["note"],
+                "tags": ["general"],
+                "context": "Generated note context for a mocked test run.",
+            })
+
+        # Mem0-style ADD/UPDATE/DELETE decision -- default to ADD (matches the
+        # baseline's "no forgetting" property; UPDATE/DELETE paths get their own
+        # dedicated mocks in tests/test_baselines.py where the decision matters).
+        if "memory database" in sys_l:
+            return json.dumps({"action": "ADD", "target_id": None})
 
         # Memory extraction responses
         if "extract" in system.lower() or "memory" in system.lower():
-            if "dog" in user_lower or "max" in user_lower or "retriever" in user_lower:
+            # extractor.EXTRACTION_PROMPT always ends with "Turn: {turn}" — pull the
+            # actual turn text back out rather than truncating the whole prompt,
+            # otherwise every extraction collapses to the shared prompt boilerplate.
+            turn_text = user_content.split("Turn: ", 1)[-1].strip()
+            turn_lower = turn_text.lower()
+            if "dog" in turn_lower or "max" in turn_lower or "retriever" in turn_lower:
                 return json.dumps([
                     {"content": "user has a golden retriever", "entity": "dog", "type": "fact"},
                     {"content": "user's dog is named Max", "entity": "Max", "type": "fact"},
                 ])
-            if "car" in user_lower and ("accident" in user_lower or "hit" in user_lower):
+            if "car" in turn_lower and ("accident" in turn_lower or "hit" in turn_lower):
                 return json.dumps([
                     {"content": "user's dog Max got hit by a car", "entity": "Max", "type": "event"},
                 ])
             return json.dumps([
-                {"content": user_content[:120], "entity": "unknown", "type": "fact"}
+                {"content": turn_text[:200], "entity": "unknown", "type": "fact"}
             ])
 
         # Summarisation / compression

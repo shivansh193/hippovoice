@@ -27,6 +27,9 @@ session_*/
 # Colab / Jupyter
 .ipynb_checkpoints/
 
+# downloaded benchmark datasets
+benchmarks/locomo/locomo10.json
+
 # OS
 .DS_Store
 Thumbs.db

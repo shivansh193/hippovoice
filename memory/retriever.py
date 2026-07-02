@@ -45,10 +45,17 @@ def hippo_retrieve(
     """
     Full HippoRAG retrieval: seed → graph walk → rerank by current salience.
 
+    Seeds are over-fetched well past top_k (4x, floor 15) before reranking —
+    salience can only promote a high-salience/lower-similarity memory above a
+    low-salience/higher-similarity one if it's actually in the candidate pool.
+    With a narrow seed pool (top_k alone), salience reranking has nothing to
+    work with once noise turns outnumber signal turns by enough volume to
+    dominate raw vector similarity to the query.
+
     Side effect: increments recall_count on each retrieved memory so future
     salience calculations reflect the reinforcement.
     """
-    seed_ids = retrieve_seeds(query, memory, top_k=max(3, top_k))
+    seed_ids = retrieve_seeds(query, memory, top_k=max(top_k * 4, 15))
     expanded_ids = expand_via_graph(seed_ids, graph)
 
     candidates = []

@@ -30,19 +30,20 @@ def test_fear_memories_survive_45_turns():
 
 
 def test_compress_threshold_merges_low_salience(mock_llm):
-    # At turn 35 with neutral/0.3: salience = 1.3 × e^(-1.75) = 0.226 < COMPRESS_THRESHOLD (0.25)
-    # but > FORGET_THRESHOLD (0.08) — so memories should compress, not forget
+    # neutral/0.3: salience_weight = 1.3, λ_eff = 0.05 / 1.3 = 0.0385/turn
+    # At turn 55: salience = 1.3 × e^(-2.115) = 0.157 — below COMPRESS_THRESHOLD (0.25)
+    # but above FORGET_THRESHOLD (0.08) — so memories should compress, not forget
     memories = _make_memories(5, "neutral", 0.3)
-    active, forgotten = apply_forgetting_cycle(memories, current_turn=35, llm_client=mock_llm)
+    active, forgotten = apply_forgetting_cycle(memories, current_turn=55, llm_client=mock_llm)
     assert len(active) == 1, f"Expected 1 compressed entry, got {len(active)}"
     assert len(forgotten) == 0
     assert active[0].get("compressed_from") == 5
 
 
 def test_compress_without_llm_joins_contents():
-    # Same turn arithmetic: neutral/0.3 at turn 35 → compress zone
+    # Same turn arithmetic: neutral/0.3 at turn 55 → compress zone
     memories = _make_memories(3, "neutral", 0.3)
-    active, _ = apply_forgetting_cycle(memories, current_turn=35, llm_client=None)
+    active, _ = apply_forgetting_cycle(memories, current_turn=55, llm_client=None)
     assert len(active) == 1
     assert "memory 0" in active[0]["content"] or ";" in active[0]["content"]
 

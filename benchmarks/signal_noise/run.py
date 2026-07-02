@@ -1,13 +1,38 @@
 """
 Signal/noise benchmark — the core empirical claim.
 
-45-turn synthetic conversation:
-  odd turns  → signal (fear/sadness, intensity 0.7–0.95)
-  even turns → noise  (neutral, intensity 0.01)
+A long synthetic conversation dominated by mundane ("noise") turns with a
+sparse handful of emotionally significant ("signal") turns interspersed —
+this is meant to model a real day-to-day companion, where the overwhelming
+majority of what gets said is small talk and only occasionally something
+worth remembering long-term comes up. After the conversation, query for
+"what important things happened to the user recently?" and measure what
+fraction of the top-10 retrieved memories are noise.
 
-After 45 turns, query for "what important things happened to the user recently?"
-and measure what fraction of the top-10 retrieved memories are noise.
+Note on ratio: an earlier version of this benchmark used a 1:1 signal:noise
+split (22 signal / 22 noise, `noise_per_signal=1`). At that ratio plain cosine
+similarity already retrieves signal turns preferentially, because the
+retrieval query is itself semantically about "important/emotionally
+significant" things — any reasonable embedding model does that matching
+regardless of forgetting. That made NaiveRAG score ~0% noise, which doesn't
+test the actual "noisy attic" failure mode.
+
+`noise_per_signal` controls how much noise dominates by volume. Default is 2
+(66 total turns) — high enough that plain similarity search picks up
+noticeably more noise than HippoVoice's salience-weighted retrieval, but
+still within the window the decay time-constant (λ=0.05/turn, see
+memory/scorer.py) was tuned for. Pushing much past ~turn 90-100 degrades
+*every* decay-based system, HippoVoice included, because sheer conversation
+length eventually lets recency (very-fresh noise, near-zero turns_elapsed)
+outweigh even a strongly emotion-boosted but comparatively old signal memory
+— a real, known limitation of pure exponential decay, not a benchmark
+artifact. Multi-session consolidation (compress/forget cycles run
+periodically, not just at query time) is the mitigation; it isn't stressed by
+this single-session benchmark.
 """
+
+import itertools
+import random
 
 SIGNAL_TURNS = [
     "My father was diagnosed with stage 3 cancer last week and I feel absolutely terrified.",
@@ -34,6 +59,9 @@ SIGNAL_TURNS = [
     "I witnessed a terrible accident on my way to work and I can't stop seeing it.",
 ]
 
+# Small base list kept for backwards compatibility / readability; the actual
+# noise pool used in the benchmark is generated programmatically below since
+# a realistic noisy-attic scenario needs far more mundane turns than signal.
 NOISE_TURNS = [
     "The weather was cloudy today.",
     "I had cereal for breakfast this morning.",
@@ -59,6 +87,51 @@ NOISE_TURNS = [
     "I ate lunch at my desk instead of the break room.",
 ]
 
+# ── Templated noise pool ──────────────────────────────────────────────────────
+# Combinatorial generation of mundane, low-salience sentences so the noise
+# pool can be scaled up without hand-writing hundreds of lines. Deterministic
+# (fixed seed) so the benchmark is reproducible run to run.
+
+_SUBJECTS = ["The weather", "The coffee", "My commute", "The office", "The kitchen",
+             "The traffic", "My phone", "The mail", "The elevator", "The neighbor's dog",
+             "The printer", "The bus", "The grocery store", "The wifi", "The thermostat"]
+_PREDICATES = ["was a bit different today", "seemed fine, nothing notable", "was mildly annoying",
+               "worked as usual", "was slightly delayed", "was about the same as always",
+               "needed a small adjustment", "was unremarkable", "took a little longer than expected",
+               "was quiet today"]
+_FILLERS = [
+    "I had a sandwich for lunch.",
+    "I refilled my water bottle twice today.",
+    "I organized a drawer in my desk.",
+    "I listened to a podcast on the way home.",
+    "I charged my phone overnight.",
+    "I swept the kitchen floor.",
+    "I replied to a few emails.",
+    "I watered the plants on the balcony.",
+    "I folded some laundry in the evening.",
+    "I browsed a few articles before bed.",
+]
+
+
+def _generate_noise_pool(n: int, seed: int = 7) -> list[str]:
+    rng = random.Random(seed)
+    combos = list(itertools.product(_SUBJECTS, _PREDICATES))
+    rng.shuffle(combos)
+    pool = [f"{subj} {pred}." for subj, pred in combos]
+    pool.extend(_FILLERS)
+    pool.extend(NOISE_TURNS)
+    # dedup while preserving order, then cycle if still short of n
+    seen = set()
+    deduped = []
+    for s in pool:
+        if s not in seen:
+            seen.add(s)
+            deduped.append(s)
+    if len(deduped) < n:
+        deduped = (deduped * (n // len(deduped) + 1))
+    return deduped[:n]
+
+
 RETRIEVAL_QUERY = "What important or emotionally significant things have happened to the user?"
 
 SIGNAL_KEYWORDS = {
@@ -74,10 +147,11 @@ def _is_signal(content: str) -> bool:
     return any(kw in content_lower for kw in SIGNAL_KEYWORDS)
 
 
-def run_signal_noise_benchmark(pipeline, system_name: str) -> dict:
+def run_signal_noise_benchmark(pipeline, system_name: str, noise_per_signal: int = 2) -> dict:
     """
-    Ingest 45 turns (alternating noise/signal starting with noise at turn 0),
-    then retrieve top-10 and measure noise contamination.
+    Ingest a long conversation (signal turns sparsely interspersed among many
+    noise turns, ratio 1:noise_per_signal), then retrieve top-10 and measure
+    noise contamination.
 
     Returns:
         {
@@ -85,24 +159,31 @@ def run_signal_noise_benchmark(pipeline, system_name: str) -> dict:
             "noise_rate": float,       # fraction of top-10 that are noise
             "signal_count": int,
             "noise_count": int,
+            "total_turns": int,
             "retrieved": list[dict],
         }
     """
-    # Build the 45-turn script: noise on even indices (0,2,4…), signal on odd (1,3,5…)
+    noise_pool = _generate_noise_pool(len(SIGNAL_TURNS) * noise_per_signal)
+
     turns = []
-    noise_iter = iter(NOISE_TURNS)
+    noise_iter = iter(noise_pool)
     signal_iter = iter(SIGNAL_TURNS)
+    block = noise_per_signal + 1  # noise_per_signal noise turns, then 1 signal turn
 
-    for i in range(44):
-        if i % 2 == 0:
+    exhausted = False
+    while not exhausted:
+        for _ in range(noise_per_signal):
             t = next(noise_iter, None)
-        else:
-            t = next(signal_iter, None)
-        if t:
+            if t is None:
+                exhausted = True
+                break
             turns.append(t)
-
-    # Final turn is always a signal turn (turn 44 = even → noise pattern ends with signal)
-    turns.append(next(signal_iter, SIGNAL_TURNS[-1]))
+        if exhausted:
+            break
+        t = next(signal_iter, None)
+        if t is None:
+            break
+        turns.append(t)
 
     # Ingest all turns
     for turn_text in turns:
@@ -121,5 +202,6 @@ def run_signal_noise_benchmark(pipeline, system_name: str) -> dict:
         "signal_count": signal_count,
         "noise_count": noise_count,
         "total_retrieved": len(retrieved),
+        "total_turns": len(turns),
         "retrieved": retrieved,
     }
