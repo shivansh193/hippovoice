@@ -29,10 +29,20 @@ def extract_memories(turn_text: str, llm_client) -> list[dict]:
         if not isinstance(memories, list):
             return []
         valid_types = {"fact", "preference", "event", "person"}
+        cleaned_memories = []
         for m in memories:
+            if not isinstance(m, dict):
+                continue
+            content = m.get("content")
+            if not isinstance(content, str) or not content.strip():
+                # LLM occasionally omits/misnames the content field on real
+                # (non-mocked) inference; drop these rather than storing a
+                # dict that will blow up every downstream m["content"] access.
+                continue
             if m.get("type") not in valid_types:
                 m["type"] = "fact"
-        return memories
+            cleaned_memories.append(m)
+        return cleaned_memories
     except (json.JSONDecodeError, TypeError):
         return []
 

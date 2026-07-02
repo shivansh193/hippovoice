@@ -54,7 +54,7 @@ def _compress(memories: list[dict], current_turn: int, llm_client=None) -> dict:
     If an LLM client is available, ask it for a one-sentence summary.
     Otherwise, concatenate contents separated by '; '.
     """
-    contents = [m["content"] for m in memories]
+    contents = [m.get("content", "") for m in memories]
 
     if llm_client is not None:
         joined = "; ".join(contents)
