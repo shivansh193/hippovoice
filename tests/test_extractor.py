@@ -119,6 +119,29 @@ def test_empty_turn_returns_empty_or_list(mock_llm):
     assert isinstance(result, list)
 
 
+def test_memories_missing_content_are_dropped():
+    from unittest.mock import MagicMock
+    llm = MagicMock()
+    llm.generate.return_value = (
+        '[{"content": "likes tea", "entity": "user", "type": "preference"}, '
+        '{"entity": "user", "type": "fact"}, '
+        '{"content": "", "entity": "user", "type": "fact"}, '
+        '{"content": "   ", "entity": "user", "type": "fact"}]'
+    )
+    memories = extract_memories("something", llm)
+    assert len(memories) == 1
+    assert memories[0]["content"] == "likes tea"
+
+
+def test_non_dict_items_in_llm_response_are_skipped():
+    from unittest.mock import MagicMock
+    llm = MagicMock()
+    llm.generate.return_value = '["just a string", {"content": "ok", "type": "fact"}]'
+    memories = extract_memories("something", llm)
+    assert len(memories) == 1
+    assert memories[0]["content"] == "ok"
+
+
 # ── extract_turn ──────────────────────────────────────────────────────────────
 
 def test_fearful_turn_emotion(mock_llm, sad_audio_embedding):
