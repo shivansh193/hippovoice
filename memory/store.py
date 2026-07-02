@@ -74,6 +74,17 @@ class MemoryStore:
             self._client = chromadb.PersistentClient(path=persist_path)
         else:
             self._client = chromadb.EphemeralClient()
+            # EphemeralClient shares its in-memory backend by collection name
+            # across ALL instances in the same process (verified: two separate
+            # EphemeralClient() objects using the same name see each other's
+            # data). Without uniquifying here, every default-named MemoryStore
+            # -- HippoVoicePipeline, NaiveRAG, Mem0Baseline, AMemBaseline, and
+            # every "fresh" per-conversation pipeline in run_locomo -- would
+            # silently accumulate into one shared collection instead of
+            # starting empty. Persistent (on-disk) collections are exempt:
+            # a caller passing persist_path clearly wants a named, reloadable
+            # collection (session save/load), so we honor collection_name as-is.
+            collection_name = f"{collection_name}-{uuid.uuid4().hex[:8]}"
 
         self._collection = self._client.get_or_create_collection(
             collection_name,
@@ -110,7 +121,9 @@ class MemoryStore:
         if n == 0:
             return []
         query_emb = self.embedder.encode(query).tolist()
-        results = self._collection.query(query_embeddings=[query_emb], n_results=n)
+        results = self._collection.query(
+            query_embeddings=[query_emb], n_results=n, include=["documents", "metadatas", "distances"]
+        )
         return self._format_results(results)
 
     def get_by_id(self, memory_id: str) -> dict | None:
@@ -147,10 +160,14 @@ class MemoryStore:
         ids = results.get("ids", [[]])[0]
         docs = results.get("documents", [[]])[0]
         metas = results.get("metadatas", [[]])[0]
-        for mid, doc, meta in zip(ids, docs, metas):
+        # cosine space -> distance is (1 - similarity); absent when not requested
+        distances = (results.get("distances") or [[]])[0]
+        for i, (mid, doc, meta) in enumerate(zip(ids, docs, metas)):
             entry = {"id": mid, "content": doc, **meta}
             if mid in self._id_to_meta:
                 entry = {**self._id_to_meta[mid], "id": mid, **entry}
+            if i < len(distances):
+                entry["_distance"] = distances[i]
             out.append(entry)
         return out
 
