@@ -16,6 +16,7 @@ repo above. We download and cache it directly rather than going through
 from __future__ import annotations
 
 import json
+import time
 import urllib.request
 from pathlib import Path
 
@@ -83,6 +84,7 @@ def run_locomo(
     data_path: str | None = None,
     checkpoint_path: str | None = None,
     verbose: bool = True,
+    batch_size: int = 50,
 ) -> dict:
     """
     Run LoCoMo evaluation.
@@ -112,8 +114,14 @@ def run_locomo(
     session": that only resets the Python process, not /content/'s disk, so
     a leftover checkpoint from an earlier dry-run attempt survives restarts.
 
-    `verbose` prints per-conversation and per-50-turns progress, since this
-    otherwise gives zero output until fully done.
+    `verbose` prints per-conversation progress, since this otherwise gives
+    zero output until fully done.
+
+    `batch_size`, when the pipeline supports `ingest_text_turns_batch`
+    (HippoVoicePipeline does), controls how many independent turns get
+    extracted in a single forward pass -- and how often progress prints
+    during ingestion. Pipelines without that method fall back to one
+    ingest_text_turn() call per turn (progress printed every 50 turns).
 
     Returns {"accuracy": float, "total": int, "correct": int, "details": [...]}
     """
@@ -167,10 +175,31 @@ def run_locomo(
         turns = _flatten_conversation(conv["conversation"])
         if verbose:
             print(f"Conversation {i + 1}/{len(conversations)}: ingesting {len(turns)} turns...")
-        for t, turn_text in enumerate(turns):
-            conv_pipeline.ingest_text_turn(turn_text)
-            if verbose and (t + 1) % 50 == 0:
-                print(f"  ingested {t + 1}/{len(turns)} turns")
+        ingest_start = time.perf_counter()
+        if hasattr(conv_pipeline, "ingest_text_turns_batch"):
+            # Each turn's extraction is independent of every other turn's --
+            # batching them into one forward pass avoids per-turn GPU idle
+            # overhead. Storage/decay/turn-order stay fully sequential inside
+            # ingest_text_turns_batch, so results are identical either way.
+            for b in range(0, len(turns), batch_size):
+                chunk = turns[b:b + batch_size]
+                conv_pipeline.ingest_text_turns_batch(chunk)
+                done = b + len(chunk)
+                if verbose:
+                    elapsed = time.perf_counter() - ingest_start
+                    print(
+                        f"  ingested {done}/{len(turns)} turns "
+                        f"({elapsed:.0f}s elapsed, {elapsed / done:.2f}s/turn)"
+                    )
+        else:
+            for t, turn_text in enumerate(turns):
+                conv_pipeline.ingest_text_turn(turn_text)
+                if verbose and (t + 1) % 50 == 0:
+                    elapsed = time.perf_counter() - ingest_start
+                    print(
+                        f"  ingested {t + 1}/{len(turns)} turns "
+                        f"({elapsed:.0f}s elapsed, {elapsed / (t + 1):.2f}s/turn)"
+                    )
 
         qa_pairs = conv.get("qa", [])
         if not include_adversarial:
