@@ -81,6 +81,8 @@ def run_locomo(
     max_qa_per_conversation: int | None = None,
     include_adversarial: bool = False,
     data_path: str | None = None,
+    checkpoint_path: str | None = None,
+    verbose: bool = True,
 ) -> dict:
     """
     Run LoCoMo evaluation.
@@ -95,6 +97,15 @@ def run_locomo(
     cheap smoke test (a full run is ~150-250 QA pairs x 10 conversations,
     each needing an LLM call, which is slow on a single T4).
 
+    `checkpoint_path`, if given, saves progress to that JSON file after each
+    conversation and resumes from it if the file already exists. Every turn
+    and QA pair is a real LLM call, so a full run is tens of minutes to a
+    couple hours -- long enough that a Colab free-tier disconnect losing all
+    progress is a real, painful risk without this.
+
+    `verbose` prints per-conversation and per-50-turns progress, since this
+    otherwise gives zero output until fully done.
+
     Returns {"accuracy": float, "total": int, "correct": int, "details": [...]}
     """
     from pipeline import HippoVoicePipeline
@@ -107,13 +118,35 @@ def run_locomo(
     correct = 0
     total = 0
     details = []
+    start_index = 0
 
-    for conv in conversations:
+    if checkpoint_path and Path(checkpoint_path).exists():
+        with open(checkpoint_path) as f:
+            state = json.load(f)
+        correct = state["correct"]
+        total = state["total"]
+        details = state["details"]
+        start_index = state["next_conversation_index"]
+        if verbose:
+            print(
+                f"Resuming from checkpoint: {start_index}/{len(conversations)} "
+                f"conversations already done ({correct}/{total} correct so far)"
+            )
+
+    for i, conv in enumerate(conversations):
+        if i < start_index:
+            continue
+
         # Fresh pipeline per conversation -- memory shouldn't leak across conversations
         conv_pipeline = HippoVoicePipeline(llm_client=pipeline.llm, text_only=True)
 
-        for turn_text in _flatten_conversation(conv["conversation"]):
+        turns = _flatten_conversation(conv["conversation"])
+        if verbose:
+            print(f"Conversation {i + 1}/{len(conversations)}: ingesting {len(turns)} turns...")
+        for t, turn_text in enumerate(turns):
             conv_pipeline.ingest_text_turn(turn_text)
+            if verbose and (t + 1) % 50 == 0:
+                print(f"  ingested {t + 1}/{len(turns)} turns")
 
         qa_pairs = conv.get("qa", [])
         if not include_adversarial:
@@ -151,6 +184,18 @@ def run_locomo(
                 "predicted": predicted,
                 "correct": is_correct,
             })
+
+        if verbose:
+            print(f"  conversation {i + 1} done -- {correct}/{total} correct so far")
+
+        if checkpoint_path:
+            with open(checkpoint_path, "w") as f:
+                json.dump({
+                    "correct": correct,
+                    "total": total,
+                    "details": details,
+                    "next_conversation_index": i + 1,
+                }, f)
 
     accuracy = correct / total if total > 0 else 0.0
     return {"accuracy": round(accuracy, 4), "total": total, "correct": correct, "details": details}
