@@ -67,6 +67,14 @@ def _compress(memories: list[dict], current_turn: int, llm_client=None) -> dict:
         summary = "; ".join(contents)
 
     avg_intensity = sum(m.get("emotion", {}).get("intensity", 0.0) for m in memories) / len(memories)
+    # Inherit the oldest source memory's turn_created rather than stamping
+    # "now". Resetting the clock here would let a batch of long-decayed,
+    # low-value noise reappear as if freshly created, letting it outrank
+    # properly-aged high-salience memories on pure recency at the next
+    # retrieval -- consolidation should preserve age, not erase it.
+    earliest_turn = min(
+        (m.get("turn_created", current_turn) for m in memories), default=current_turn
+    )
 
     return {
         "content": summary,
@@ -75,7 +83,7 @@ def _compress(memories: list[dict], current_turn: int, llm_client=None) -> dict:
         "emotion": {"label": "neutral", "intensity": round(avg_intensity, 3)},
         "base_weight": 0.5,
         "recall_count": 0,
-        "turn_created": current_turn,
+        "turn_created": earliest_turn,
         "current_salience": COMPRESS_THRESHOLD,
         "compressed_from": len(memories),
     }
