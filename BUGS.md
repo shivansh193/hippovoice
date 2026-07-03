@@ -6,6 +6,19 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Stale checkpoint silently replayed dry-run mock results as if they were
+  real.** `run_locomo`'s checkpoint/resume (added to survive Colab
+  disconnects) had no way to tell "this checkpoint is from a different run"
+  from "this checkpoint is a valid resume point" — it just trusted whatever
+  `/content/locomo_checkpoint.json` said. A checkpoint written while the
+  notebook's DRY RUN mock LLM was active (which hardcodes `"unknown"` for
+  every QA answer) got silently resumed under a later *real* LLM run,
+  reporting a garbage 0/45 accuracy with zero actual inference happening.
+  Made worse because Colab's "Restart session" only resets the Python
+  process, not `/content/`'s disk, so the stale file survived multiple
+  restarts. Fixed: checkpoints now carry a fingerprint (LLM model
+  name/backend + run parameters); a mismatch prints a loud warning and
+  starts fresh instead of silently trusting the file.
 - **LLM-extracted memories missing `content` crashed `_compress`.** A real
   (non-mocked) LLM occasionally emits a memory JSON object without a
   `content` key; it flowed unfiltered into the store and blew up
