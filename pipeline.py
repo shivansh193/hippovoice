@@ -150,10 +150,26 @@ class HippoVoicePipeline:
         if self.current_turn > 0 and self.current_turn % DECAY_EVERY == 0:
             all_memories = self.memory.get_all()
             active, forgotten = apply_forgetting_cycle(all_memories, self.current_turn, self.llm)
-            for m in forgotten:
-                mid = m.get("id")
-                if mid:
-                    self.memory.delete(mid)
+
+            all_ids = {m["id"] for m in all_memories}
+            active_ids = {m["id"] for m in active if "id" in m}
+            forgotten_ids = {m["id"] for m in forgotten if "id" in m}
+            # Memories that ended up in neither list were merged into a new
+            # compressed entry (apply_forgetting_cycle silently drops them
+            # from its return value) -- their content now lives on in that
+            # entry, so the originals should go too, same as anything
+            # explicitly forgotten.
+            compressed_away_ids = all_ids - active_ids - forgotten_ids
+
+            for mid in forgotten_ids | compressed_away_ids:
+                self.memory.delete(mid)
+
+            for m in active:
+                if "id" not in m:
+                    # Newly-created synthetic compressed entry -- persist it.
+                    # (Existing active entries are already correctly in the
+                    # store and are left untouched.)
+                    self.memory.add(m)
 
     @property
     def llm(self):

@@ -6,6 +6,44 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Forgetting/compression never actually touched the store -- confirmed,
+  fixed.** `MemoryStore.get_all()` returned memory dicts with no `"id"`
+  field (the id was only ever the dict *key* in `_id_to_meta`, never a field
+  inside the value). `HippoVoicePipeline._maybe_decay()`'s
+  `mid = m.get("id")` was therefore always `None`, so
+  `self.memory.delete(mid)` was never called -- forgetting has been a no-op
+  in every run of this project, ever. Worse, the synthetic "compressed"
+  entry `_compress()` builds was never persisted back into the store either
+  (`_maybe_decay()` computed `active`/`forgotten` but never wrote `active`
+  anywhere) -- the entire compress/forget mechanism had zero effect on the
+  real store; it just grew unbounded forever. This likely did NOT explain
+  the 0/45 LoCoMo QA result on its own (retrieval reranks by salience
+  computed fresh at query time, independent of whether stale entries were
+  housekept away) but is a real, separate scalability/correctness bug on its
+  own. Fixed: `get_all()` now includes each memory's id; `_maybe_decay()`
+  deletes both explicitly-forgotten memories and originals that got merged
+  into a compression (previously silently dropped from both `active` and
+  `forgotten` with no one ever removing them), and persists the new
+  compressed entry into the store. Added tests confirming the store's
+  memory count actually shrinks under decay and that compression actually
+  replaces originals with a persisted synthetic entry.
+- **Confirmed, quantified: decay collapses to near-zero at LoCoMo's
+  conversation scale.** `decay_lambda=0.05/turn` was tuned/validated for
+  ~90-100 turn conversations (signal/noise benchmark). LoCoMo conversations
+  run 369-663 turns. Numerically: at `turns_elapsed=600`, even a
+  fear-boosted maximally-salient memory scores `0.000221`; a freshly-created
+  neutral memory (`turns_elapsed=2`) scores `1.004` -- ~4,500x higher. For
+  plain neutral facts (most LoCoMo answers: dates, names, identities), the
+  old-vs-fresh gap is ~638 billion times. This means QA retrieval at the end
+  of a long conversation is dominated almost entirely by recency, not
+  relevance -- this is very likely the primary driver of the observed 0/45
+  LoCoMo accuracy, independent of model quality or the scoring-punctuation
+  bug fixed earlier. **Not yet fixed** -- how to address it is a design
+  decision (blend raw similarity into final reranking instead of pure
+  salience? normalize/cap decay so turns_elapsed doesn't grow unbounded?
+  treat long multi-session conversations as genuinely out of scope for a
+  companion-memory system tuned for shorter-horizon emotional salience?)
+  rather than something to silently pick without discussion.
 - **Confirmed on Colab: batching gave ~0.3-0.58s/turn vs ~9.6s/turn before**
   (real LoCoMo run, 419/369/663-turn conversations) -- roughly 20x. Real
   inference confirmed working correctly (varied, on-topic answers, not the

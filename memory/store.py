@@ -150,7 +150,10 @@ class MemoryStore:
         self._id_to_meta.pop(memory_id, None)
 
     def get_all(self) -> list[dict]:
-        return list(self._id_to_meta.values())
+        # Include each memory's id -- callers (e.g. the forgetting cycle)
+        # need it to act on specific entries, and the dict stored in
+        # _id_to_meta never carries its own key as a field.
+        return [{**m, "id": mid} for mid, m in self._id_to_meta.items()]
 
     def count(self) -> int:
         return self._collection.count()
