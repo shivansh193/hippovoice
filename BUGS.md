@@ -6,6 +6,33 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Rung 1 implemented: split memory store by type (semantic facts vs
+  episodic events).** `HippoVoicePipeline` now holds `semantic_memory`
+  (`fact`/`preference`/`person` types -- never decays, survives regardless
+  of age) and `episodic_memory` (`event` type -- keeps the existing
+  Ebbinghaus decay + emotional consolidation + forgetting/compression
+  exactly as before). `retrieve()` queries both and combines results.
+  `_maybe_decay()` only ever touches the episodic store. This directly
+  targets the Rung 0 finding (facts being physically deleted, not just
+  outranked) for content that's inherently durable rather than a specific
+  timed occurrence.
+
+  **Important caveat, worth being honest about**: this does NOT fix the
+  date-recall category on its own. "When did Caroline go to the support
+  group" is answered by an *event* memory by definition -- events still
+  route to the episodic store and are still subject to the same decay
+  collapse quantified earlier. Of the 45 sampled questions, only the
+  identity/preference/relationship-status-style ones (a minority) benefit
+  directly from this split; the date-heavy majority still needs the
+  episodic store's retrieval to stop being purely recency-dominated --
+  i.e. Rung 2 (relevance × availability reranking for episodic retrieval)
+  is not optional polish, it's necessary for most of the observed failures.
+  Caught a real regression while implementing this: the `passthrough_llm`
+  test fixture tagged all extracted memories `"fact"`, silently routing the
+  entire signal/noise benchmark's content into the never-decaying semantic
+  store and completely bypassing salience/decay -- noise rate reverted to
+  30% (NaiveRAG-level) until fixed to tag `"event"` (the benchmark's
+  content -- personal narrative statements -- is inherently episodic).
 - **`_flatten_conversation()` discarded session dates -- confirmed root cause
   for a large share of LoCoMo's date questions.** LoCoMo turns routinely use
   relative date language ("yesterday", "last Saturday", "next month") that's

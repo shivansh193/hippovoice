@@ -3,9 +3,24 @@ HippoVoicePipeline — end-to-end voice companion with hippocampal memory.
 
 Audio in → STT → memory extract → store → retrieve → LLM → TTS → audio out.
 Forgetting cycle runs every DECAY_EVERY turns.
+
+Memory is split by type into two stores with different temporal behavior,
+mirroring the consolidation/retrieval distinction in memory research:
+  - semantic_memory (type in fact/preference/person): durable facts about
+    the person -- who they are, what they prefer, who's in their life. These
+    don't decay; they're the companion's persistent model of who it's
+    talking to, corrected by newer information rather than aged out.
+  - episodic_memory (type == event): specific moments/events. Ebbinghaus
+    decay + emotional consolidation apply here -- forgetting most of an
+    average day while keeping emotionally significant events is the
+    intended behavior for this store specifically.
+
+A single decaying-trace store trying to serve both jobs means durable facts
+either get deleted once age crosses FORGET_THRESHOLD, or the decay constant
+gets detuned to protect them at the cost of not forgetting noise properly.
+Splitting by type removes that tension.
 """
 
-import uuid
 from pathlib import Path
 
 from memory.extractor import extract_turn, extract_memories, tag_emotion_text
@@ -15,6 +30,11 @@ from memory.decay import apply_forgetting_cycle
 from llm.context import build_system_prompt, BASE_COMPANION_PROMPT
 
 DECAY_EVERY = 10  # apply forgetting cycle every N turns
+
+# memory/extractor.py's EXTRACTION_PROMPT always tags each fragment's type as
+# one of these four; SEMANTIC_TYPES + EPISODIC_TYPES fully partition that set.
+SEMANTIC_TYPES = {"fact", "preference", "person"}
+EPISODIC_TYPES = {"event"}
 
 
 class HippoVoicePipeline:
@@ -32,7 +52,12 @@ class HippoVoicePipeline:
     ):
         self.text_only = text_only
         self.current_turn = 0
-        self.memory = HippoMemory(persist_path=memory_path)
+        self.semantic_memory = HippoMemory(
+            collection_name="hippovoice_semantic", persist_path=memory_path
+        )
+        self.episodic_memory = HippoMemory(
+            collection_name="hippovoice_episodic", persist_path=memory_path
+        )
 
         # Lazy-load heavy models so unit tests that mock them don't pay load cost
         self._llm = llm_client
@@ -93,20 +118,29 @@ class HippoVoicePipeline:
             emotion = tag_emotion_audio(text, dummy_emb)
             for m in new_memories:
                 m["emotion"] = emotion
-                m.setdefault("base_weight", 1.0)
-                m.setdefault("recall_count", 0)
-                m["turn_created"] = self.current_turn
-                self.memory.add(m)
+                self._add_memory(m)
             self._maybe_decay()
             self.current_turn += 1
 
     def retrieve(self, query: str, top_k: int = 10) -> list[dict]:
-        """Direct retrieval for benchmark evaluation."""
-        return hippo_retrieve(query, self.memory, self.memory.graph, self.current_turn, top_k)
+        """
+        Direct retrieval for benchmark evaluation.
+
+        Queries both stores and combines results -- each contributes up to
+        top_k, since they answer different kinds of questions ("what do you
+        know about me" vs. "what happened when") rather than competing for
+        the same slots.
+        """
+        semantic_results = self.semantic_memory.search(query, top_k=top_k)
+        episodic_results = hippo_retrieve(
+            query, self.episodic_memory, self.episodic_memory.graph, self.current_turn, top_k
+        )
+        return semantic_results + episodic_results
 
     def save(self, path: str):
         """Persist memory state across sessions."""
-        self.memory.save(path)
+        self.semantic_memory.save(str(Path(path, "semantic")))
+        self.episodic_memory.save(str(Path(path, "episodic")))
         # Also save turn counter
         import json
         Path(path, "state.json").write_text(
@@ -116,7 +150,8 @@ class HippoVoicePipeline:
     def load(self, path: str):
         """Restore memory state from a previous session."""
         import json
-        self.memory.load(path)
+        self.semantic_memory.load(str(Path(path, "semantic")))
+        self.episodic_memory.load(str(Path(path, "episodic")))
         state_file = Path(path) / "state.json"
         if state_file.exists():
             self.current_turn = json.loads(state_file.read_text())["current_turn"]
@@ -125,9 +160,7 @@ class HippoVoicePipeline:
 
     def _run_memory_and_generate(self, transcript: str, audio_emb) -> str:
         self._store_memories(transcript, audio_emb)
-        retrieved = hippo_retrieve(
-            transcript, self.memory, self.memory.graph, self.current_turn, top_k=5
-        )
+        retrieved = self.retrieve(transcript, top_k=5)
         system = build_system_prompt(retrieved, BASE_COMPANION_PROMPT)
         response = self.llm.generate(
             system=system,
@@ -141,14 +174,22 @@ class HippoVoicePipeline:
     def _store_memories(self, text: str, audio_emb):
         new_memories = extract_turn(text, audio_emb, self.llm)
         for m in new_memories:
-            m.setdefault("base_weight", 1.0)
-            m.setdefault("recall_count", 0)
-            m["turn_created"] = self.current_turn
-            self.memory.add(m)
+            self._add_memory(m)
+
+    def _add_memory(self, m: dict):
+        m.setdefault("base_weight", 1.0)
+        m.setdefault("recall_count", 0)
+        m["turn_created"] = self.current_turn
+        target = self.semantic_memory if m.get("type") in SEMANTIC_TYPES else self.episodic_memory
+        target.add(m)
 
     def _maybe_decay(self):
+        """
+        Forgetting cycle -- episodic memory only. Semantic memory (durable
+        facts/preferences/people) never decays, so it has nothing to do here.
+        """
         if self.current_turn > 0 and self.current_turn % DECAY_EVERY == 0:
-            all_memories = self.memory.get_all()
+            all_memories = self.episodic_memory.get_all()
             active, forgotten = apply_forgetting_cycle(all_memories, self.current_turn, self.llm)
 
             all_ids = {m["id"] for m in all_memories}
@@ -162,14 +203,14 @@ class HippoVoicePipeline:
             compressed_away_ids = all_ids - active_ids - forgotten_ids
 
             for mid in forgotten_ids | compressed_away_ids:
-                self.memory.delete(mid)
+                self.episodic_memory.delete(mid)
 
             for m in active:
                 if "id" not in m:
                     # Newly-created synthetic compressed entry -- persist it.
                     # (Existing active entries are already correctly in the
                     # store and are left untouched.)
-                    self.memory.add(m)
+                    self.episodic_memory.add(m)
 
     @property
     def llm(self):

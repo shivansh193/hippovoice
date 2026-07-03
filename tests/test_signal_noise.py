@@ -40,7 +40,12 @@ def passthrough_llm():
             return json.dumps({"action": "ADD", "target_id": None})
         if "extract" in sys_l or "memory" in sys_l:
             turn_text = user_content.split("Turn: ", 1)[-1].strip()
-            return json.dumps([{"content": turn_text, "entity": "unknown", "type": "fact"}])
+            # This benchmark's turns are narrative events ("my dog passed
+            # away", "the weather was cloudy") -- tag as "event" so they
+            # route to the episodic (decaying, salience-reranked) store
+            # HippoVoicePipeline routes event-type memories into, not the
+            # semantic (never-decaying) store meant for durable facts.
+            return json.dumps([{"content": turn_text, "entity": "unknown", "type": "event"}])
         return "I understand."
 
     def batch_side_effect(system, messages_list, max_tokens=512):
