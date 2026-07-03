@@ -16,6 +16,7 @@ repo above. We download and cache it directly rather than going through
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.request
 from pathlib import Path
@@ -259,11 +260,41 @@ def build_qa_context(retrieved_memories: list[dict]) -> str:
     return "\n".join(f"- {m.get('content', '')}" for m in retrieved_memories)
 
 
+def rescore_details(details: list[dict]) -> dict:
+    """
+    Recompute accuracy from an already-run details list (e.g. loaded from a
+    checkpoint file written by a previous run_locomo() call) using the
+    current _answer_matches logic, without re-running any ingestion or LLM
+    calls. Useful after a scoring-only change (e.g. a matching/tokenization
+    fix) when the predictions themselves haven't changed and re-running the
+    full (slow, GPU-hungry) benchmark would be wasteful.
+    """
+    correct = 0
+    rescored = []
+    for d in details:
+        is_correct = _answer_matches(d["predicted"], d["gold"])
+        rescored.append({**d, "correct": is_correct})
+        correct += int(is_correct)
+    total = len(rescored)
+    return {
+        "accuracy": round(correct / total, 4) if total else 0.0,
+        "total": total,
+        "correct": correct,
+        "details": rescored,
+    }
+
+
+_WORD_RE = re.compile(r"\w+")
+
+
 def _answer_matches(predicted: str, gold: str) -> bool:
     if gold in predicted:
         return True
-    # Fuzzy: all words in gold answer appear in predicted
-    gold_words = set(gold.split())
-    pred_words = set(predicted.split())
+    # Fuzzy: all words in gold answer appear in predicted. Tokenize with a
+    # word regex rather than a plain whitespace split -- otherwise a trailing
+    # period ("adoption." vs "adoption") silently breaks an otherwise-correct
+    # match, since "adoption." and "adoption" are different set members.
+    gold_words = set(_WORD_RE.findall(gold))
+    pred_words = set(_WORD_RE.findall(predicted))
     overlap = gold_words & pred_words
     return len(overlap) / len(gold_words) >= 0.7 if gold_words else False

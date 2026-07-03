@@ -6,6 +6,24 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Confirmed on Colab: batching gave ~0.3-0.58s/turn vs ~9.6s/turn before**
+  (real LoCoMo run, 419/369/663-turn conversations) -- roughly 20x. Real
+  inference confirmed working correctly (varied, on-topic answers, not the
+  dry-run mock's hardcoded `"unknown"`).
+- **`_answer_matches` fuzzy scoring broke on trailing punctuation.** Tokenized
+  with a plain whitespace split, so e.g. predicted `"...adoption."` (trailing
+  period) never equalled gold word `"adoption"` as a set member -- an
+  otherwise-correct answer could score zero overlap purely because of
+  punctuation. Fixed: tokenize with `\w+` instead of `.split()`. Also added
+  `rescore_details()` -- recomputes accuracy from an existing checkpoint's
+  saved predictions using the current matcher, with zero LLM calls, so a
+  scoring-only fix doesn't require re-running the (slow, GPU-hungry) full
+  benchmark. Note: on the 5 examples seen from a real run, this fix alone
+  didn't flip any to correct -- the deeper issue in those cases looks like
+  genuinely missing/wrong content in the answers (dates, specific details),
+  not just a formatting mismatch. Worth checking whether that's a retrieval
+  problem (right facts not surfaced) or a model-capacity problem (0.6B too
+  weak to synthesize them correctly) once a real rescoring run is in.
 - **Ingestion made one real LLM call per turn, badly underutilizing the
   GPU.** A single short sequence through a 0.6B model leaves a T4 mostly
   idle -- ~9-10s/turn observed on a real LoCoMo run (419-turn conversation),
