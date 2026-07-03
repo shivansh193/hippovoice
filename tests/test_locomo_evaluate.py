@@ -52,6 +52,24 @@ def test_flatten_conversation_orders_sessions_numerically():
     assert turns == ["A: first", "A: second", "A: tenth"]
 
 
+def test_flatten_conversation_prefixes_each_turn_with_session_date():
+    # Regression: relative date language ("yesterday", "last Saturday") in a
+    # turn is only resolvable against its session's actual calendar date --
+    # previously discarded entirely during flattening.
+    conv = {
+        "session_1_date_time": "8 May, 2023",
+        "session_1": [{"speaker": "Caroline", "text": "I went to a support group yesterday."}],
+    }
+    turns = _flatten_conversation(conv)
+    assert turns == ["[8 May, 2023] Caroline: I went to a support group yesterday."]
+
+
+def test_flatten_conversation_handles_missing_date():
+    conv = {"session_1": [{"speaker": "A", "text": "no date available"}]}
+    turns = _flatten_conversation(conv)
+    assert turns == ["A: no date available"]
+
+
 # ── rescore_details ────────────────────────────────────────────────────────────
 
 def test_rescore_details_recomputes_accuracy_without_rerunning():

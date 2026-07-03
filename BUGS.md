@@ -6,6 +6,31 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **`_flatten_conversation()` discarded session dates -- confirmed root cause
+  for a large share of LoCoMo's date questions.** LoCoMo turns routinely use
+  relative date language ("yesterday", "last Saturday", "next month") that's
+  only resolvable against the session's actual calendar date, stored
+  separately in a `session_N_date_time` key that was never read. Verified
+  directly: evidence turn `D1:3` says "went to a support group *yesterday*";
+  session 1's date is 8 May 2023; 8 May − 1 day = **7 May 2023**, exactly
+  matching gold. The date was never given to the model at all -- no amount
+  of retrieval/ranking/decay tuning could fix this class of failure. Fixed:
+  each flattened turn is now prefixed with its session's date. Roughly half
+  of the 45 sampled LoCoMo questions are date questions, so this alone
+  likely explains a large share of the "right topic, wrong/vague date"
+  failure pattern independent of anything else in this list.
+- **Rung 0 diagnostic (see below) confirms deletion, not just ranking, is
+  the dominant LoCoMo failure mode.** Ingested a full real 419-turn LoCoMo
+  conversation locally (deterministic passthrough extraction, no GPU
+  needed): only 82/419 (19.6%) of extracted memories survived to the end.
+  Checked the exact evidence turns (via LoCoMo's own `evidence` dialogue-id
+  field) for the first 5 QA pairs: all 5 were completely gone -- not in the
+  store, not in the top-40 seed pool, not in the final top-5. Confirms that
+  retrieval-side fixes alone (reranking, similarity blending) cannot recover
+  these; the information no longer exists by the time retrieval runs. This
+  is what justifies splitting the store by memory type (durable facts vs.
+  decaying episodes) rather than only adjusting the retrieval formula --
+  tracked as the next major piece of work, not yet started.
 - **Forgetting/compression never actually touched the store -- confirmed,
   fixed.** `MemoryStore.get_all()` returned memory dicts with no `"id"`
   field (the id was only ever the dict *key* in `_id_to_meta`, never a field

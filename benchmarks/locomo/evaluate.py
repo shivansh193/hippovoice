@@ -62,17 +62,33 @@ def load_locomo(data_path: str | None = None) -> list[dict]:
 
 
 def _flatten_conversation(conv: dict) -> list[str]:
-    """Flatten all session turns, in session order, into 'Speaker: text' strings."""
+    """
+    Flatten all session turns, in session order, into 'Speaker: text' strings.
+
+    Each turn is prefixed with its session's date. LoCoMo turns routinely use
+    relative date language ("yesterday", "last Saturday", "next month") that
+    can only be resolved against the session's actual calendar date -- stored
+    separately in a session_N_date_time key, previously discarded entirely
+    here. Without it, a perfectly-retrieved memory like "I went to a support
+    group yesterday" is fundamentally unanswerable for a "when did X happen"
+    question: the specific date was never in the text to begin with. Roughly
+    half of LoCoMo's QA pairs are date questions, so this alone plausibly
+    accounts for a large share of any "correct fact, wrong/missing date"
+    failures, independent of retrieval or decay behavior.
+    """
     session_keys = sorted(
         (k for k in conv if k.startswith("session_") and not k.endswith("_date_time")),
         key=lambda k: int(k.split("_")[1]),
     )
     turns = []
     for key in session_keys:
+        session_num = key.split("_")[1]
+        date = conv.get(f"session_{session_num}_date_time", "")
+        date_prefix = f"[{date}] " if date else ""
         for turn in conv[key]:
             text = (turn.get("text") or "").strip()
             if text:
-                turns.append(f"{turn.get('speaker', '')}: {text}")
+                turns.append(f"{date_prefix}{turn.get('speaker', '')}: {text}")
     return turns
 
 
