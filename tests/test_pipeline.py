@@ -4,10 +4,16 @@ from unittest.mock import MagicMock
 from pipeline import HippoVoicePipeline
 
 
-def _make_llm():
+def _make_llm(memory_type="event"):
     """LLM mock supporting both generate() and generate_batch() with
     identical per-item behavior -- batching one call per item must produce
-    the same output as issuing the calls separately."""
+    the same output as issuing the calls separately.
+
+    Defaults to tagging extracted memories as "event" (episodic -- subject
+    to decay) since most of these tests exercise ingestion/decay mechanics;
+    pass memory_type="fact" (or "preference"/"person") to route into the
+    semantic (non-decaying) store instead.
+    """
     mock = MagicMock()
 
     def per_turn(system, messages, max_tokens=512):
@@ -15,7 +21,7 @@ def _make_llm():
         user_content = messages[-1]["content"] if messages else ""
         if "extract" in sys_l or "memory" in sys_l:
             turn_text = user_content.split("Turn: ", 1)[-1].strip()
-            return json.dumps([{"content": turn_text, "entity": "unknown", "type": "fact"}])
+            return json.dumps([{"content": turn_text, "entity": "unknown", "type": memory_type}])
         if "summarise" in sys_l or "summary" in sys_l:
             return "summary"
         return "ok"
@@ -25,6 +31,10 @@ def _make_llm():
         per_turn(system, messages, max_tokens) for messages in messages_list
     ]
     return mock
+
+
+def _total_count(pipe):
+    return pipe.semantic_memory.count() + pipe.episodic_memory.count()
 
 
 def test_batch_ingestion_matches_sequential_ingestion():
@@ -38,10 +48,10 @@ def test_batch_ingestion_matches_sequential_ingestion():
     batch_pipeline.ingest_text_turns_batch(texts)
 
     assert batch_pipeline.current_turn == seq_pipeline.current_turn == len(texts)
-    assert batch_pipeline.memory.count() == seq_pipeline.memory.count()
+    assert _total_count(batch_pipeline) == _total_count(seq_pipeline)
 
-    seq_contents = sorted(m["content"] for m in seq_pipeline.memory.get_all())
-    batch_contents = sorted(m["content"] for m in batch_pipeline.memory.get_all())
+    seq_contents = sorted(m["content"] for m in seq_pipeline.episodic_memory.get_all())
+    batch_contents = sorted(m["content"] for m in batch_pipeline.episodic_memory.get_all())
     assert seq_contents == batch_contents
 
 
@@ -58,7 +68,7 @@ def test_batch_ingestion_in_chunks_matches_single_batch():
         chunked.ingest_text_turns_batch(texts[b:b + 10])
 
     assert one_shot.current_turn == chunked.current_turn == len(texts)
-    assert one_shot.memory.count() == chunked.memory.count()
+    assert _total_count(one_shot) == _total_count(chunked)
 
 
 def test_batch_ingestion_calls_generate_batch_not_generate_per_turn():
@@ -77,7 +87,7 @@ def test_batch_ingestion_empty_list():
     pipe = HippoVoicePipeline(llm_client=_make_llm(), text_only=True)
     pipe.ingest_text_turns_batch([])
     assert pipe.current_turn == 0
-    assert pipe.memory.count() == 0
+    assert _total_count(pipe) == 0
 
 
 # ── _maybe_decay actually mutates the store ─────────────────────────────────────
@@ -86,7 +96,7 @@ def test_batch_ingestion_empty_list():
 # memories were never actually deleted -- the store grew unbounded forever.
 
 def test_forgotten_memories_are_actually_deleted_from_store():
-    pipe = HippoVoicePipeline(llm_client=_make_llm(), text_only=True)
+    pipe = HippoVoicePipeline(llm_client=_make_llm(memory_type="event"), text_only=True)
     # Plain, low-intensity neutral turns -- no emotion keywords, no intensity
     # boosters -- decay fast enough to be forgotten well within 90 turns
     # (matches tests/test_decay.py's neutral/low-intensity forgetting math).
@@ -94,9 +104,9 @@ def test_forgotten_memories_are_actually_deleted_from_store():
     for t in texts:
         pipe.ingest_text_turn(t)
 
-    assert pipe.memory.count() < len(texts), (
-        "store should have actually forgotten old low-salience memories, "
-        "not accumulated every single one forever"
+    assert pipe.episodic_memory.count() < len(texts), (
+        "episodic store should have actually forgotten old low-salience "
+        "memories, not accumulated every single one forever"
     )
 
 
@@ -106,7 +116,7 @@ def test_compress_cycle_persists_compressed_entry_and_removes_originals():
     # salience ~0.13, between FORGET_THRESHOLD 0.08 and COMPRESS_THRESHOLD
     # 0.25 -- same arithmetic as tests/test_decay.py's compress-threshold test).
     original_ids = [
-        pipe.memory.add({
+        pipe.episodic_memory.add({
             "content": f"low salience memory {i}",
             "emotion": {"label": "neutral", "intensity": 0.3},
             "base_weight": 1.0, "recall_count": 0, "turn_created": 0,
@@ -117,7 +127,7 @@ def test_compress_cycle_persists_compressed_entry_and_removes_originals():
     pipe.current_turn = 60  # multiple of DECAY_EVERY so _maybe_decay actually fires
     pipe._maybe_decay()
 
-    remaining = pipe.memory.get_all()
+    remaining = pipe.episodic_memory.get_all()
     remaining_ids = {m["id"] for m in remaining}
 
     assert not (set(original_ids) & remaining_ids), (
@@ -126,3 +136,58 @@ def test_compress_cycle_persists_compressed_entry_and_removes_originals():
     compressed = [m for m in remaining if m.get("compressed_from")]
     assert len(compressed) == 1
     assert compressed[0]["compressed_from"] == 3
+
+
+# ── semantic / episodic store split ──────────────────────────────────────────────
+
+def test_fact_type_memories_route_to_semantic_store():
+    pipe = HippoVoicePipeline(llm_client=_make_llm(memory_type="fact"), text_only=True)
+    pipe.ingest_text_turn("the user's name is Alex")
+
+    assert pipe.semantic_memory.count() == 1
+    assert pipe.episodic_memory.count() == 0
+
+
+def test_event_type_memories_route_to_episodic_store():
+    pipe = HippoVoicePipeline(llm_client=_make_llm(memory_type="event"), text_only=True)
+    pipe.ingest_text_turn("the user went to the store yesterday")
+
+    assert pipe.episodic_memory.count() == 1
+    assert pipe.semantic_memory.count() == 0
+
+
+def test_preference_and_person_types_also_route_to_semantic_store():
+    for t in ("preference", "person"):
+        pipe = HippoVoicePipeline(llm_client=_make_llm(memory_type=t), text_only=True)
+        pipe.ingest_text_turn("some durable statement")
+        assert pipe.semantic_memory.count() == 1, f"type={t} should route to semantic store"
+        assert pipe.episodic_memory.count() == 0
+
+
+def test_semantic_memories_never_decay_regardless_of_age():
+    pipe = HippoVoicePipeline(llm_client=_make_llm(memory_type="fact"), text_only=True)
+    # Plain neutral content that would be forgotten fast in the episodic
+    # store -- semantic memories must survive regardless, since they carry
+    # no decay/salience treatment at all.
+    texts = [f"durable fact number {i}" for i in range(200)]
+    for t in texts:
+        pipe.ingest_text_turn(t)
+
+    assert pipe.semantic_memory.count() == len(texts), (
+        "semantic store must never forget -- durable facts shouldn't be "
+        "subject to the episodic forgetting cycle at all"
+    )
+
+
+def test_retrieve_combines_semantic_and_episodic_results():
+    pipe = HippoVoicePipeline(llm_client=_make_llm(memory_type="fact"), text_only=True)
+    pipe.ingest_text_turn("the user's favorite color is blue")
+
+    episodic_llm = _make_llm(memory_type="event")
+    pipe._llm = episodic_llm
+    pipe.ingest_text_turn("the user went hiking last weekend")
+
+    results = pipe.retrieve("tell me about the user", top_k=10)
+    contents = [r["content"] for r in results]
+    assert any("favorite color" in c for c in contents)
+    assert any("hiking" in c for c in contents)
