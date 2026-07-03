@@ -41,6 +41,7 @@ def hippo_retrieve(
     graph: AssociationGraph,
     current_turn: int,
     top_k: int = 5,
+    graph_expand_seeds: int = 10,
 ) -> list[dict]:
     """
     Full HippoRAG retrieval: seed → graph walk → rerank by current salience.
@@ -52,14 +53,22 @@ def hippo_retrieve(
     work with once noise turns outnumber signal turns by enough volume to
     dominate raw vector similarity to the query.
 
+    Graph expansion only walks from the closest `graph_expand_seeds` seeds
+    (by raw similarity, not the full over-fetched tail). Walking from a
+    marginal, barely-relevant seed pulls in nodes whose only qualification is
+    "embedding-similar to something borderline" — which gave low-relevance,
+    high-recency noise a backdoor into the salience-reranked pool even though
+    it would never have made the cut on similarity to the query itself.
+
     Side effect: increments recall_count on each retrieved memory so future
     salience calculations reflect the reinforcement.
     """
     seed_ids = retrieve_seeds(query, memory, top_k=max(top_k * 4, 15))
-    expanded_ids = expand_via_graph(seed_ids, graph)
+    expanded_ids = expand_via_graph(seed_ids[:graph_expand_seeds], graph)
+    candidate_ids = list(dict.fromkeys(seed_ids + expanded_ids))
 
     candidates = []
-    for mid in expanded_ids:
+    for mid in candidate_ids:
         m = memory.get_by_id(mid)
         if m is None:
             continue
