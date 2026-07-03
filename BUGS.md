@@ -29,23 +29,25 @@ Add to this list; don't fix silently in passing.
   in. Fixed: graph expansion now only walks from the closest
   `graph_expand_seeds` (default 10) seeds by raw similarity; the full
   over-fetched pool is still used for salience reranking itself.
+- **Confirmed on a real Colab T4 run**: after the two fixes above, HippoVoice
+  beats Mem0-style on the signal/noise benchmark (previously tied NaiveRAG
+  and lost to Mem0-style). Re-verified against real (non-mocked) LLM
+  extraction, not just the local deterministic test suite.
+- **Per-turn ingestion was far slower than necessary.** `extract_memories()`
+  requested 512 max output tokens for a task that only ever needs a few short
+  JSON fragments — on a real (non-mocked) LLM that doesn't always emit a stop
+  token quickly (residual "thinking" behavior even with
+  `enable_thinking=False`), this could burn the full budget every single
+  turn. Observed ~9.6s/turn on a real LoCoMo run. Fixed: cut to 200 tokens in
+  `memory/extractor.py`. Also switched the notebook's default Qwen3-0.6B load
+  to `load_in_4bit=False` — at this model size VRAM was never the bottleneck
+  (~3GB/15GB used on T4), and 4-bit dequant has genuine per-token latency
+  cost on GPUs without native int4 tensor cores (T4 included), so fp16 should
+  be both simpler and faster. Not yet re-benchmarked for actual speedup on
+  Colab — next run should confirm seconds/turn improved meaningfully.
 
 ## Open — found on first real (non-mocked, T4) Colab run
 
-- **HippoVoice ties NaiveRAG and loses to Mem0-style on the signal/noise
-  benchmark with a real LLM** (HippoVoice 30% noise vs Mem0-style 20%, vs a
-  passing/deterministic-mock local test suite where HippoVoice beats both).
-  The two fixes above target the most likely root causes (compress recency
-  reset, graph-expansion contamination) but haven't yet been re-verified
-  against a real Colab run — only against the local CPU test suite with the
-  deterministic `passthrough_llm` mock. **Next step: rerun the signal/noise
-  cell on Colab and confirm HippoVoice actually beats Mem0-style now.** If it
-  still loses, print the actual `retrieved` list (content + current_salience)
-  to see exactly which noise items are winning and why — recency-vs-decay
-  dynamics at this conversation length (66 turns) are the leading suspect,
-  documented in `benchmarks/signal_noise/run.py`'s module docstring as a
-  known limitation of pure exponential decay past ~90-100 turns; it may be
-  showing up earlier than expected.
 - Real LLM extraction behavior differs meaningfully from the deterministic
   `passthrough_llm` test mock — the mock always extracts exactly one memory
   per turn verbatim; a real LLM may (a) return zero memories for a boring

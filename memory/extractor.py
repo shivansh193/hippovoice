@@ -20,7 +20,12 @@ def extract_memories(turn_text: str, llm_client) -> list[dict]:
     raw = llm_client.generate(
         system="You are a memory extraction assistant. Output only valid JSON.",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=512,
+        # A few short JSON fragments never need anywhere near 512 tokens --
+        # this call runs once per conversation turn, so on models that don't
+        # emit a stop token quickly (e.g. residual "thinking" behavior even
+        # with enable_thinking=False), a generous cap here is the single
+        # biggest per-turn latency cost in the whole ingestion pipeline.
+        max_tokens=200,
     )
     try:
         # Strip any accidental markdown fences the model may add
