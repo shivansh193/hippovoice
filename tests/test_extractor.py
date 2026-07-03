@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from memory.extractor import (
     extract_memories,
+    extract_memories_batch,
     tag_emotion_text,
     tag_emotion_audio,
     extract_turn,
@@ -140,6 +141,66 @@ def test_non_dict_items_in_llm_response_are_skipped():
     memories = extract_memories("something", llm)
     assert len(memories) == 1
     assert memories[0]["content"] == "ok"
+
+
+# ── extract_memories_batch ──────────────────────────────────────────────────────
+
+def test_batch_extraction_matches_per_turn_results():
+    """Batching must not change *what* gets extracted, only how many calls it takes."""
+    from unittest.mock import MagicMock
+
+    def per_turn(turn_text: str) -> str:
+        import json
+        return json.dumps([{"content": f"fact about: {turn_text}", "entity": "x", "type": "fact"}])
+
+    llm = MagicMock()
+    llm.generate.side_effect = lambda system, messages, max_tokens=512: per_turn(
+        messages[-1]["content"].split("Turn: ", 1)[-1].strip()
+    )
+    llm.generate_batch.side_effect = lambda system, messages_list, max_tokens=512: [
+        per_turn(m[-1]["content"].split("Turn: ", 1)[-1].strip()) for m in messages_list
+    ]
+
+    turns = ["turn one", "turn two", "turn three"]
+    batch_result = extract_memories_batch(turns, llm)
+    per_turn_result = [extract_memories(t, llm) for t in turns]
+
+    assert batch_result == per_turn_result
+    assert len(batch_result) == 3
+
+
+def test_batch_extraction_calls_generate_batch_once():
+    from unittest.mock import MagicMock
+    llm = MagicMock()
+    llm.generate_batch.return_value = ["[]", "[]", "[]"]
+
+    extract_memories_batch(["a", "b", "c"], llm)
+
+    llm.generate_batch.assert_called_once()
+    assert llm.generate.call_count == 0
+
+
+def test_batch_extraction_empty_input():
+    from unittest.mock import MagicMock
+    llm = MagicMock()
+    assert extract_memories_batch([], llm) == []
+    llm.generate_batch.assert_not_called()
+
+
+def test_batch_extraction_drops_malformed_entries():
+    from unittest.mock import MagicMock
+    llm = MagicMock()
+    llm.generate_batch.return_value = [
+        '[{"content": "good one", "type": "fact"}]',
+        '[{"entity": "user", "type": "fact"}]',  # missing content
+        'not json',
+    ]
+    results = extract_memories_batch(["a", "b", "c"], llm)
+    assert results == [
+        [{"content": "good one", "type": "fact"}],
+        [],
+        [],
+    ]
 
 
 # ── extract_turn ──────────────────────────────────────────────────────────────

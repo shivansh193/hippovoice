@@ -6,6 +6,21 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Ingestion made one real LLM call per turn, badly underutilizing the
+  GPU.** A single short sequence through a 0.6B model leaves a T4 mostly
+  idle -- ~9-10s/turn observed on a real LoCoMo run (419-turn conversation),
+  and low reported GPU-Util%. Since each turn's extraction is independent of
+  every other turn's (it only depends on that single turn's text), there was
+  no need to issue them one at a time. Added: `LLMClient.generate_batch()`
+  (left-padded batched decode on the transformers/CUDA backend, sequential
+  fallback on MLX), `memory/extractor.py::extract_memories_batch()`, and
+  `HippoVoicePipeline.ingest_text_turns_batch()` -- storage/decay/turn-order
+  stay fully sequential, only the extraction LLM call is batched (default
+  chunk size 50). Wired into both `run_locomo` and
+  `run_signal_noise_benchmark` via a `hasattr` check so baseline pipelines
+  (NaiveRAG/Mem0/A-MEM, which don't define the batch method) are unaffected.
+  Not yet re-benchmarked on Colab for actual GPU-Util%/s-per-turn
+  improvement -- next run should confirm.
 - **Stale checkpoint silently replayed dry-run mock results as if they were
   real.** `run_locomo`'s checkpoint/resume (added to survive Colab
   disconnects) had no way to tell "this checkpoint is from a different run"

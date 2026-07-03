@@ -43,7 +43,11 @@ def passthrough_llm():
             return json.dumps([{"content": turn_text, "entity": "unknown", "type": "fact"}])
         return "I understand."
 
+    def batch_side_effect(system, messages_list, max_tokens=512):
+        return [side_effect(system, messages, max_tokens) for messages in messages_list]
+
     mock.generate.side_effect = side_effect
+    mock.generate_batch.side_effect = batch_side_effect
     return mock
 
 

@@ -14,19 +14,17 @@ Schema: [{{"content": "...", "entity": "...", "type": "fact|preference|event|per
 Turn: {turn}"""
 
 
-def extract_memories(turn_text: str, llm_client) -> list[dict]:
-    """Call the LLM to pull discrete memory fragments from a single turn."""
-    prompt = EXTRACTION_PROMPT.format(turn=turn_text)
-    raw = llm_client.generate(
-        system="You are a memory extraction assistant. Output only valid JSON.",
-        messages=[{"role": "user", "content": prompt}],
-        # A few short JSON fragments never need anywhere near 512 tokens --
-        # this call runs once per conversation turn, so on models that don't
-        # emit a stop token quickly (e.g. residual "thinking" behavior even
-        # with enable_thinking=False), a generous cap here is the single
-        # biggest per-turn latency cost in the whole ingestion pipeline.
-        max_tokens=200,
-    )
+EXTRACTION_SYSTEM_PROMPT = "You are a memory extraction assistant. Output only valid JSON."
+
+# A few short JSON fragments never need anywhere near 512 tokens -- this call
+# runs once per conversation turn, so on models that don't emit a stop token
+# quickly (e.g. residual "thinking" behavior even with enable_thinking=False),
+# a generous cap here is the single biggest per-turn latency cost in the
+# whole ingestion pipeline.
+EXTRACTION_MAX_TOKENS = 200
+
+
+def _parse_extraction_response(raw: str) -> list[dict]:
     try:
         # Strip any accidental markdown fences the model may add
         cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
@@ -50,6 +48,38 @@ def extract_memories(turn_text: str, llm_client) -> list[dict]:
         return cleaned_memories
     except (json.JSONDecodeError, TypeError):
         return []
+
+
+def extract_memories(turn_text: str, llm_client) -> list[dict]:
+    """Call the LLM to pull discrete memory fragments from a single turn."""
+    prompt = EXTRACTION_PROMPT.format(turn=turn_text)
+    raw = llm_client.generate(
+        system=EXTRACTION_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=EXTRACTION_MAX_TOKENS,
+    )
+    return _parse_extraction_response(raw)
+
+
+def extract_memories_batch(turn_texts: list[str], llm_client) -> list[list[dict]]:
+    """
+    Batched version of extract_memories -- one forward pass covering many
+    turns instead of one generate() call each. Each turn's extraction is
+    independent of every other turn's, so this only changes wall-clock cost,
+    not the result: same prompt/parsing per item, just issued as a single
+    batch via llm_client.generate_batch().
+    """
+    if not turn_texts:
+        return []
+    messages_list = [
+        [{"role": "user", "content": EXTRACTION_PROMPT.format(turn=t)}] for t in turn_texts
+    ]
+    raws = llm_client.generate_batch(
+        system=EXTRACTION_SYSTEM_PROMPT,
+        messages_list=messages_list,
+        max_tokens=EXTRACTION_MAX_TOKENS,
+    )
+    return [_parse_extraction_response(raw) for raw in raws]
 
 
 def tag_emotion_text(text: str) -> dict:

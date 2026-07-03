@@ -75,6 +75,31 @@ class HippoVoicePipeline:
         self._maybe_decay()
         self.current_turn += 1
 
+    def ingest_text_turns_batch(self, texts: list[str]):
+        """
+        Ingest many turns via one batched extraction call instead of one
+        generate() call per turn -- storage, decay, and turn ordering stay
+        fully sequential (identical semantics to calling ingest_text_turn()
+        once per text). Each turn's extraction is independent of the
+        others, so batching only changes wall-clock cost on the LLM side,
+        not the result.
+        """
+        import numpy as np
+        from memory.extractor import extract_memories_batch, tag_emotion_audio
+
+        dummy_emb = np.zeros(1280, dtype=np.float32)
+        batch_memories = extract_memories_batch(texts, self.llm)
+        for text, new_memories in zip(texts, batch_memories):
+            emotion = tag_emotion_audio(text, dummy_emb)
+            for m in new_memories:
+                m["emotion"] = emotion
+                m.setdefault("base_weight", 1.0)
+                m.setdefault("recall_count", 0)
+                m["turn_created"] = self.current_turn
+                self.memory.add(m)
+            self._maybe_decay()
+            self.current_turn += 1
+
     def retrieve(self, query: str, top_k: int = 10) -> list[dict]:
         """Direct retrieval for benchmark evaluation."""
         return hippo_retrieve(query, self.memory, self.memory.graph, self.current_turn, top_k)

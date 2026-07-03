@@ -98,12 +98,63 @@ class LLMClient:
         out = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
         return _THINK_RE.sub("", out).strip()
 
+    def _generate_transformers_batch(
+        self, system: str, messages_list: list[list[dict]], max_tokens: int
+    ) -> list[str]:
+        import torch
+
+        # Causal-LM batched generation requires left-padding so every row's
+        # real content ends at the same position -- the model would
+        # otherwise keep generating mid-sequence for shorter, right-padded
+        # rows instead of continuing past their actual last token.
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
+
+        texts = []
+        for messages in messages_list:
+            chat = [{"role": "system", "content": system}] + messages
+            texts.append(self.tokenizer.apply_chat_template(
+                chat, tokenize=False, add_generation_prompt=True,
+                enable_thinking=False,
+            ))
+
+        inputs = self.tokenizer(texts, return_tensors="pt", padding=True).to(self.device)
+        input_len = inputs["input_ids"].shape[1]
+        with torch.no_grad():
+            output_ids = self.model.generate(
+                **inputs, max_new_tokens=max_tokens,
+                do_sample=False, pad_token_id=self.tokenizer.eos_token_id,
+            )
+        outputs = []
+        for row in output_ids:
+            new_tokens = row[input_len:]
+            out = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+            outputs.append(_THINK_RE.sub("", out).strip())
+        return outputs
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def generate(self, system: str, messages: list[dict], max_tokens: int = 512) -> str:
         if self._backend == "mlx":
             return self._generate_mlx(system, messages, max_tokens)
         return self._generate_transformers(system, messages, max_tokens)
+
+    def generate_batch(
+        self, system: str, messages_list: list[list[dict]], max_tokens: int = 512
+    ) -> list[str]:
+        """
+        Batched generation: one forward pass covering many independent
+        prompts instead of one generate() call each. Only meaningfully
+        parallel on the transformers/CUDA backend -- a single small model
+        badly underutilizes GPU compute one sequence at a time. MLX falls
+        back to a sequential loop (no batched decode path here).
+        """
+        if not messages_list:
+            return []
+        if self._backend == "mlx":
+            return [self._generate_mlx(system, messages, max_tokens) for messages in messages_list]
+        return self._generate_transformers_batch(system, messages_list, max_tokens)
 
     def unload(self):
         """Free memory — call before loading STT or TTS."""

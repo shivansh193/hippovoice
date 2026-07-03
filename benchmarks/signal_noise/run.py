@@ -185,9 +185,16 @@ def run_signal_noise_benchmark(pipeline, system_name: str, noise_per_signal: int
             break
         turns.append(t)
 
-    # Ingest all turns
-    for turn_text in turns:
-        pipeline.ingest_text_turn(turn_text)
+    # Ingest all turns -- batch extraction when the pipeline supports it
+    # (each turn's extraction is independent, so it doesn't need to happen
+    # one real LLM call at a time).
+    if hasattr(pipeline, "ingest_text_turns_batch"):
+        batch_size = 50
+        for b in range(0, len(turns), batch_size):
+            pipeline.ingest_text_turns_batch(turns[b:b + batch_size])
+    else:
+        for turn_text in turns:
+            pipeline.ingest_text_turn(turn_text)
 
     # Retrieve and classify
     retrieved = pipeline.retrieve(RETRIEVAL_QUERY, top_k=10)
