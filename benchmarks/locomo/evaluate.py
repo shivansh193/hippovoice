@@ -103,6 +103,15 @@ def run_locomo(
     couple hours -- long enough that a Colab free-tier disconnect losing all
     progress is a real, painful risk without this.
 
+    The checkpoint records a fingerprint (LLM model name/backend + run
+    parameters) and refuses to resume from one written under a different
+    setup -- e.g. a dry-run mock LLM, or a different num_conversations --
+    since silently trusting a stale file there would replay whatever
+    (possibly garbage) results it already has instead of actually running.
+    `checkpoint_path` itself does NOT persist across a Colab "Restart
+    session": that only resets the Python process, not /content/'s disk, so
+    a leftover checkpoint from an earlier dry-run attempt survives restarts.
+
     `verbose` prints per-conversation and per-50-turns progress, since this
     otherwise gives zero output until fully done.
 
@@ -115,6 +124,14 @@ def run_locomo(
 
     conversations = load_locomo(data_path)[:num_conversations]
 
+    fingerprint = {
+        "model_name": getattr(pipeline.llm, "model_name", None),
+        "backend": getattr(pipeline.llm, "_backend", None),
+        "num_conversations": num_conversations,
+        "max_qa_per_conversation": max_qa_per_conversation,
+        "include_adversarial": include_adversarial,
+    }
+
     correct = 0
     total = 0
     details = []
@@ -123,15 +140,22 @@ def run_locomo(
     if checkpoint_path and Path(checkpoint_path).exists():
         with open(checkpoint_path) as f:
             state = json.load(f)
-        correct = state["correct"]
-        total = state["total"]
-        details = state["details"]
-        start_index = state["next_conversation_index"]
-        if verbose:
+        if state.get("fingerprint") != fingerprint:
             print(
-                f"Resuming from checkpoint: {start_index}/{len(conversations)} "
-                f"conversations already done ({correct}/{total} correct so far)"
+                f"WARNING: ignoring checkpoint at {checkpoint_path} -- it was written "
+                f"under a different setup ({state.get('fingerprint')}) than this run "
+                f"({fingerprint}). Starting fresh. Delete the file to silence this."
             )
+        else:
+            correct = state["correct"]
+            total = state["total"]
+            details = state["details"]
+            start_index = state["next_conversation_index"]
+            if verbose:
+                print(
+                    f"Resuming from checkpoint: {start_index}/{len(conversations)} "
+                    f"conversations already done ({correct}/{total} correct so far)"
+                )
 
     for i, conv in enumerate(conversations):
         if i < start_index:
@@ -191,6 +215,7 @@ def run_locomo(
         if checkpoint_path:
             with open(checkpoint_path, "w") as f:
                 json.dump({
+                    "fingerprint": fingerprint,
                     "correct": correct,
                     "total": total,
                     "details": details,
