@@ -6,6 +6,18 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Checkpoint fingerprint didn't detect code changes, only config
+  changes -- caused a real false "no improvement" reading.** After pulling
+  the `retrieve()` merge fix, a rerun with the same model/num_conversations/
+  max_qa_per_conversation matched the existing checkpoint's fingerprint and
+  silently resumed (skipped re-running entirely), replaying byte-for-byte
+  identical pre-fix predictions. Looked like the fix did nothing; it had
+  just never actually run. Same root cause as the earlier dry-run
+  contamination bug, different trigger. Fixed: fingerprint now also
+  includes the current git commit hash (`_current_commit_hash()`), so any
+  code change invalidates a stale checkpoint automatically -- no manual
+  deletion needed, since the old checkpoint format doesn't have a
+  `"commit"` key at all and will mismatch on its own.
 - **Confirmed on Colab: Rung 1 regressed the signal/noise guardrail.**
   HippoVoice noise rate jumped to 40% (12 signal/8 noise = 20 total
   results), worse than every baseline including NaiveRAG. Root cause:
