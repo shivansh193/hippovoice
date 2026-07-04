@@ -72,6 +72,13 @@ def expand_via_graph(
     return list(expanded)
 
 
+# Shared with HippoVoicePipeline.retrieve(), which scores semantic-store
+# (never-decaying) candidates on the same relevance/availability basis --
+# semantic facts are always maximally "available", so their score is this
+# same formula with availability pinned to 1.0.
+DEFAULT_RELEVANCE_WEIGHT = 0.65
+
+
 def hippo_retrieve(
     query: str,
     memory: HippoMemory,
@@ -79,7 +86,7 @@ def hippo_retrieve(
     current_turn: int,
     top_k: int = 5,
     graph_expand_seeds: int = 10,
-    relevance_weight: float = 0.65,
+    relevance_weight: float = DEFAULT_RELEVANCE_WEIGHT,
 ) -> list[dict]:
     """
     Full HippoRAG retrieval: seed → graph walk → rerank by relevance × availability.

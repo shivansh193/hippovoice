@@ -25,7 +25,7 @@ from pathlib import Path
 
 from memory.extractor import extract_turn, extract_memories, tag_emotion_text
 from memory.store import HippoMemory
-from memory.retriever import hippo_retrieve
+from memory.retriever import hippo_retrieve, DEFAULT_RELEVANCE_WEIGHT
 from memory.decay import apply_forgetting_cycle
 from llm.context import build_system_prompt, BASE_COMPANION_PROMPT
 
@@ -126,16 +126,34 @@ class HippoVoicePipeline:
         """
         Direct retrieval for benchmark evaluation.
 
-        Queries both stores and combines results -- each contributes up to
-        top_k, since they answer different kinds of questions ("what do you
-        know about me" vs. "what happened when") rather than competing for
-        the same slots.
+        Queries both stores and merges results onto a single comparable
+        score, competing for one shared top_k budget -- NOT top_k from each
+        store unconditionally. The semantic store has no decay/importance
+        filtering at all (correct for durable facts: relevance alone should
+        decide whether they surface), which means giving it a guaranteed
+        allocation regardless of match quality turns it into an unfiltered
+        noise backdoor for anything the extractor mis-classifies as
+        fact/preference/person instead of event. Scoring both stores with
+        the same relevance/availability formula (semantic candidates get
+        availability pinned to 1.0, since they never decay) means a
+        mis-classified noise turn still has to be genuinely relevant to
+        make the cut, same as anything in the episodic store.
         """
-        semantic_results = self.semantic_memory.search(query, top_k=top_k)
-        episodic_results = hippo_retrieve(
-            query, self.episodic_memory, self.episodic_memory.graph, self.current_turn, top_k
+        semantic_pool = self.semantic_memory.search(query, top_k=top_k * 2)
+        for r in semantic_pool:
+            relevance = 1.0 - r.get("_distance", 0.0)
+            r["_relevance"] = round(relevance, 6)
+            r["current_salience"] = 1.0
+            r["_score"] = round(
+                DEFAULT_RELEVANCE_WEIGHT * relevance + (1 - DEFAULT_RELEVANCE_WEIGHT), 6
+            )
+
+        episodic_pool = hippo_retrieve(
+            query, self.episodic_memory, self.episodic_memory.graph, self.current_turn, top_k * 2
         )
-        return semantic_results + episodic_results
+
+        combined = sorted(semantic_pool + episodic_pool, key=lambda r: r.get("_score", 0.0), reverse=True)
+        return combined[:top_k]
 
     def save(self, path: str):
         """Persist memory state across sessions."""

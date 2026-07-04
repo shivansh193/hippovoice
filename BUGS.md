@@ -6,6 +6,22 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Confirmed on Colab: Rung 1 regressed the signal/noise guardrail.**
+  HippoVoice noise rate jumped to 40% (12 signal/8 noise = 20 total
+  results), worse than every baseline including NaiveRAG. Root cause:
+  `retrieve()` returned up to `top_k` from **each** store unconditionally
+  (up to 2x results), and the semantic store applies zero decay/importance
+  filtering by design (correct for durable facts -- relevance alone should
+  gate them) -- so any noise turn the real LLM happened to mis-classify as
+  `fact`/`preference`/`person` instead of `event` got a permanent,
+  unfiltered slot in every single retrieval, with no mechanism to ever
+  suppress it. Fixed: both stores now merge onto one comparable
+  relevance/availability score (semantic candidates get availability
+  pinned to 1.0, since they never decay, using the same formula and
+  `DEFAULT_RELEVANCE_WEIGHT` as episodic scoring) and compete for a single
+  shared `top_k` budget instead of each getting a guaranteed allocation.
+  **Not yet re-verified on Colab** -- next signal/noise run should confirm
+  this actually brings the noise rate back down below baselines again.
 - **Rung 2 implemented: episodic retrieval reranks by relevance ×
   availability instead of pure salience.** `hippo_retrieve()` now computes,
   per candidate: relevance (cosine similarity between query and memory
