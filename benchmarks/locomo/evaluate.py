@@ -222,6 +222,12 @@ def run_locomo(
     Scoring uses LoCoMo's actual published methodology (stemmed token F1,
     category-branched -- see score_answer), not a simple boolean match.
 
+    Each detail also records the exact "context" string handed to the LLM
+    and "retrieved_ids" (which memory ids were surfaced) for that question
+    -- the memory store itself isn't persisted anywhere past this call, so
+    this is the only way to later trace "was the right fact ever in
+    context?" (see print_qa_trace) without a fresh run.
+
     Returns {"avg_f1": float, "total": int, "total_f1": float,
              "bins": {"near_zero": int, "partial": int, "high": int},
              "details": [...]}
@@ -342,6 +348,12 @@ def run_locomo(
                 "category": category,
                 "f1": round(f1, 4),
                 "correct": f1 >= 0.7,
+                # Exact context handed to the LLM for this question -- lets
+                # a later trace answer "was the right fact ever in context?"
+                # without needing another real run, since the memory store
+                # itself isn't persisted anywhere past this call.
+                "context": context,
+                "retrieved_ids": [r.get("id") for r in retrieved],
             })
 
         if verbose:
@@ -512,3 +524,34 @@ def rescore_details(details: list[dict], data_path: str | None = None) -> dict:
         "bins": bin_f1_scores(rescored),
         "details": rescored,
     }
+
+
+def print_qa_trace(details: list[dict], question_substring: str) -> None:
+    """
+    Print the full trace for questions matching a substring: the exact
+    context handed to the model, the raw prediction, gold, F1, and category.
+
+    This is the tool for answering "was the right fact ever in context, or
+    did retrieval never surface it?" without needing another real run --
+    run_locomo() now logs "context" per question in details, so this works
+    directly off an existing checkpoint. If "context" is missing (an older
+    checkpoint written before this was added), says so explicitly rather
+    than silently printing nothing useful.
+    """
+    matches = [d for d in details if question_substring.lower() in d["question"].lower()]
+    if not matches:
+        print(f"No question matching {question_substring!r} found.")
+        return
+    for d in matches:
+        print("=" * 70)
+        print(f"Q: {d['question']}")
+        print(f"gold:      {d['gold']!r}")
+        print(f"predicted: {d['predicted']!r}")
+        print(f"f1={d.get('f1')}  category={d.get('category')}")
+        print("-" * 70)
+        if "context" in d:
+            print("Context handed to the model:")
+            print(d["context"] or "(empty -- nothing retrieved)")
+        else:
+            print("(context not logged -- this checkpoint predates context logging; rerun to capture it)")
+        print()
