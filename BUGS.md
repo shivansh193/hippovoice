@@ -6,6 +6,40 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Confirmed via `print_qa_trace` on a real run: bare-name degenerate
+  extractions were crowding out real facts in the semantic store.** Traced
+  "What is Caroline's identity?" and "What is Caroline's relationship
+  status?" -- both got 5/5 retrieved results that were literally just the
+  word `"Caroline"`, no actual content. Root cause: `_parse_extraction_response`
+  only checked that `content` was non-empty, not that it was substantive.
+  On a low-content turn (a greeting, a short reply), the real LLM sometimes
+  lazily emits `{"content": "Caroline", "entity": "Caroline", "type":
+  "person"}` instead of correctly returning nothing. Since `type="person"`
+  routes to the never-decaying semantic store, these accumulate over a long
+  conversation, and a bare proper noun is a near-perfect cosine match for
+  any query mentioning that same name -- confirmed directly that they
+  systematically crowd out genuinely informative facts about the same
+  person (which, per `debug_extraction_for_turns`, *were* being correctly
+  extracted and classified -- extraction wasn't the bottleneck for these
+  two questions, this pollution was). Fixed: reject extracted content with
+  fewer than 2 words. A single bare word can't be a self-contained "fact,
+  preference, or event" per the extraction prompt's own definition.
+  **Not yet re-verified on a real run** -- next LoCoMo run should show
+  these two questions (and likely others affected by the same pollution)
+  finally surfacing real context.
+
+- **Confirmed via `print_qa_trace`, NOT yet fixed: name-similarity
+  confusion in retrieval.** Traced "Which city have both Jean and John
+  visited?" (gold `Rome`, predicted `"downtown"`) -- the retrieved context
+  was entirely about "Jon" and "Gina" (a different conversation's speakers),
+  not "John"/"Jean" at all. The model's answer was a verbatim echo of
+  "Jon: It's downtown which is awesome..." -- i.e. this is a genuine
+  retrieval failure, not model confabulation: "Jon" and "John" are close
+  enough in embedding space that seed similarity search pulled in the wrong
+  person's content entirely. This is a harder problem than the bare-name
+  fix above -- embedding-based semantic search has no real entity
+  disambiguation mechanism. Open; no fix attempted yet.
+
 - **The entire LoCoMo scoring methodology was wrong -- replaced with
   LoCoMo's actual published F1 scorer.** `_answer_matches` was a home-grown
   boolean matcher (substring or >=70% word overlap), never validated

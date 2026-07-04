@@ -42,6 +42,21 @@ def _parse_extraction_response(raw: str) -> list[dict]:
                 # (non-mocked) inference; drop these rather than storing a
                 # dict that will blow up every downstream m["content"] access.
                 continue
+            if len(content.split()) < 2:
+                # On a low-content turn (a greeting, a short reply), a real
+                # LLM sometimes lazily emits content that's just the
+                # speaker/subject's bare name ("Caroline") instead of
+                # correctly returning nothing -- confirmed directly on a
+                # real run: a "person"-type memory with content="Caroline"
+                # never decays (semantic store), and a bare proper noun is a
+                # near-perfect cosine match for any query mentioning that
+                # same name, so these accumulate over a long conversation
+                # and systematically crowd out genuinely informative facts
+                # about the same person under pure-relevance ranking. A
+                # single bare word can't be a self-contained "fact,
+                # preference, or event" per the extraction prompt's own
+                # definition, so require at least two.
+                continue
             if m.get("type") not in valid_types:
                 m["type"] = "fact"
             cleaned_memories.append(m)
