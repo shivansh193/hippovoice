@@ -6,6 +6,47 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Confirmed on a real (verified-clean, post-restart) Kaggle run: the
+  rebalanced prompt (previous entry, `ff99a7b`) fixed the LoCoMo-side
+  overcorrection but broke the signal/noise benchmark completely --
+  `0% noise (signal=0, noise=0)` for HippoVoice AND Mem0-style (shared
+  extraction code), meaning literally nothing was extracted from any of the
+  22 signal or 44 noise turns.** This surfaced a second, previously-hidden
+  bug in `run_signal_noise_benchmark`: `noise_rate = noise_count /
+  len(retrieved) if retrieved else 0.0` silently reports a "clean" 0.0 when
+  retrieval returns nothing at all -- a total extraction failure printed as
+  `PASS` (`< 20% noise`) because the vacuous 0/0 case is indistinguishable
+  from a genuinely clean result by that formula alone. Fixed:
+  `run_signal_noise_benchmark` now raises loudly if `retrieve()` returns
+  zero results, instead of computing a misleading 0.0.
+
+  Root cause of the actual extraction failure: signal turns in this
+  benchmark are first-person, heavily emotional disclosures ("My father was
+  diagnosed with stage 3 cancer last week and I feel absolutely
+  terrified.") -- structurally, heavy emotional language plus first person
+  phrasing, which is exactly what the "skip reactions" instruction (from
+  the previous fix) was written to suppress. The model generalized "skip
+  emotionally-worded turns" instead of "skip turns with no new
+  information," so genuine crisis disclosures got treated the same as
+  "Thanks, Mel!" This is the third distinct failure mode found while tuning
+  this one prompt (over-extraction of junk -> under-extraction of
+  everything -> under-extraction specifically of emotionally-worded
+  signal), which says more about how brittle few-shot-only calibration is
+  for a 0.6B model than about any one wording choice.
+
+  Fixed (not yet validated on a real run): reworded the instruction to
+  frame the skip condition narrowly and explicitly ("bare greeting, bare
+  acknowledgment, or question with no statement attached") and added a
+  direct counter-example ("A turn describing something upsetting or
+  emotional that happened to someone is NOT a bare reaction -- it is an
+  event, and must be extracted"), plus a new few-shot example structurally
+  similar to the benchmark's signal turns (a distressing personal
+  disclosure) without reusing any exact benchmark sentence. **Next step**:
+  before any GPU run, validate directly against a handful of real
+  `SIGNAL_TURNS`/noise-pool sentences (not just the junk/real probe used for
+  the LoCoMo side) to confirm this specific regression is actually fixed,
+  given how many rounds this prompt has needed so far.
+
 - **Confirmed on a real Kaggle run: the reaction-skipping prompt fix
   (previous entry below) overcorrected -- the model started skipping real
   facts too, not just reactions.** Validated with commit `4e6ea86` actually
