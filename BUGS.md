@@ -6,6 +6,49 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Confirmed on a real Kaggle run: the reaction-skipping prompt fix
+  (previous entry below) overcorrected -- the model started skipping real
+  facts too, not just reactions.** Validated with commit `4e6ea86` actually
+  loaded (`commit [4e6ea86]` confirmed in Step 2 output this time). The
+  validation probe showed the fix worked exactly as intended for junk
+  (`"Caroline: Thanks, Mel!"` -> `[]`, all four junk turns now correctly
+  empty) but also collapsed the one fact that matters most for this
+  benchmark: `"Caroline: The transgender stories were so inspiring! I was so
+  happy and thankful for all the support."` -> `[]`, nothing extracted at
+  all. System-wide confirmation: conversation 1's semantic store dropped
+  from 700 -> 19 memories (way past "remove the junk," into "remove almost
+  everything"), and the signal/noise benchmark showed HippoVoice at
+  `0% noise (signal=0, noise=0)` -- not a win, a total extraction failure
+  (Mem0-style baseline showed the identical 0/0, since it shares this
+  extraction code, confirming this isn't retrieval-side).
+
+  Root cause: the previous prompt repeated "skip" three times with only one
+  counterbalancing "keep" example, and that one keep example was an
+  explicit, on-the-nose preference statement -- nothing showed the model
+  that an *implied* fact (identity revealed indirectly, e.g. "the
+  transgender stories were so inspiring") still counts as worth extracting.
+  A 0.6B model given a lopsided few-shot set generalized "return `[]`" as
+  the safe default for anything that wasn't a close lexical match to the
+  one positive example. Compounding this: the one extraction that *did*
+  succeed (`"Caroline is planning to adopt and become a single parent"`)
+  was suspiciously close to one of the few-shot examples, which had been
+  copied near-verbatim from an already-traced real turn (D2:14) -- i.e. the
+  prompt was effectively leaking a test-adjacent example rather than
+  demonstrating the general rule, and the model may have been pattern
+  matching that one sentence rather than generalizing.
+
+  Fixed (not yet validated on a real run): rebalanced the few-shot set to
+  one skip example and two keep examples -- one explicit preference, one
+  *indirect/implied* fact (new synthetic example, not reused from any real
+  traced turn, to avoid the same leakage issue) -- and reworded the
+  instruction to state the skip condition once instead of three times, so
+  the extraction default isn't biased toward suppression. **Next step**:
+  before any full re-ingest, re-run the same cheap validation probe
+  (junk turns + the two known real fact turns, including the exact
+  transgender sentence) to confirm both directions hold simultaneously this
+  time -- junk still empty, AND the transgender fact extracts -- before
+  spending any GPU time on a full LoCoMo run.
+
 - **Confirmed via a full-store rank dump on a real Kaggle run: the bare-name
   fix was necessary but nowhere near sufficient -- the real problem is
   massive extraction over-generation, not a narrow content-quality edge
