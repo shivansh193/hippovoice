@@ -6,6 +6,29 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Confirmed on Kaggle: the top_k-merge fix worked (10 total results, not
+  20), but noise rate got WORSE (50%) -- traced to a second, distinct bug
+  in how semantic candidates are scored.** Pinning semantic candidates'
+  availability to `1.0` and feeding it through the same blended
+  `relevance_weight * relevance + (1 - relevance_weight) * availability`
+  formula used for episodic candidates gave every semantic-store item a
+  flat, unconditional bonus of `(1 - relevance_weight)` -- since
+  availability never varies for them, that term carried no real
+  information, it just uniformly inflated every semantic candidate
+  regardless of actual relevance to the query. Reproduced locally with zero
+  GPU: a mock that classifies noise turns as `"fact"` (plausible real-LLM
+  behavior) hit a 90% noise rate purely from this scoring floor -- pure
+  irrelevant noise scored ~0.35-0.5 just for being in the semantic store.
+  Ruled out relevance_weight tuning as the cause first (tested 0.05-0.65,
+  all gave 0% noise locally with the deterministic mock, since that mock
+  never routes anything into the semantic store at all -- confirms local
+  regression tests weren't exercising the actual failure mode). Fixed:
+  semantic candidates are now scored by relevance alone, no blended
+  constant. Added a permanent regression test
+  (`test_irrelevant_semantic_facts_do_not_outrank_relevant_episodic_memories`)
+  reproducing the exact failure. **Not yet re-verified on Colab/Kaggle**
+  (GPU credits exhausted for now) -- next run should confirm signal/noise
+  is back under baselines.
 - **Checkpoint fingerprint didn't detect code changes, only config
   changes -- caused a real false "no improvement" reading.** After pulling
   the `retrieve()` merge fix, a rerun with the same model/num_conversations/

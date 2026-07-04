@@ -191,3 +191,40 @@ def test_retrieve_combines_semantic_and_episodic_results():
     contents = [r["content"] for r in results]
     assert any("favorite color" in c for c in contents)
     assert any("hiking" in c for c in contents)
+
+
+def test_irrelevant_semantic_facts_do_not_outrank_relevant_episodic_memories():
+    """
+    Regression: scoring semantic candidates with availability pinned to 1.0
+    through the SAME blended relevance/availability formula used for
+    episodic candidates gave every semantic-store item a flat, unconditional
+    bonus of (1 - relevance_weight) -- since availability never varies for
+    them, that term carried no real information, it just uniformly inflated
+    every semantic candidate regardless of actual relevance to the query.
+    Confirmed this let a handful of noise turns mis-classified as "fact"
+    dominate retrieval with a 90% noise rate on a real signal/noise
+    benchmark run. Semantic candidates must be scored by relevance alone.
+    """
+    pipe = HippoVoicePipeline(llm_client=_make_llm(memory_type="fact"), text_only=True)
+    # Several irrelevant "facts" -- unrelated to the query below, but each
+    # would get an unconditional score floor under the old (broken) formula.
+    for text in [
+        "the weather was cloudy today",
+        "the office printer was out of paper",
+        "the commute took a bit longer than usual",
+    ]:
+        pipe.ingest_text_turn(text)
+
+    episodic_llm = _make_llm(memory_type="event")
+    pipe._llm = episodic_llm
+    pipe.ingest_text_turn(
+        "the user's father was diagnosed with cancer and the user is devastated"
+    )
+
+    results = pipe.retrieve("what important or emotionally significant things happened", top_k=1)
+    assert len(results) == 1
+    assert "cancer" in results[0]["content"], (
+        "a genuinely significant episodic memory should outrank irrelevant "
+        "semantic-store facts, not lose purely because of unconditional "
+        "availability=1.0 scoring"
+    )

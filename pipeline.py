@@ -25,7 +25,7 @@ from pathlib import Path
 
 from memory.extractor import extract_turn, extract_memories, tag_emotion_text
 from memory.store import HippoMemory
-from memory.retriever import hippo_retrieve, DEFAULT_RELEVANCE_WEIGHT
+from memory.retriever import hippo_retrieve
 from memory.decay import apply_forgetting_cycle
 from llm.context import build_system_prompt, BASE_COMPANION_PROMPT
 
@@ -133,20 +133,27 @@ class HippoVoicePipeline:
         decide whether they surface), which means giving it a guaranteed
         allocation regardless of match quality turns it into an unfiltered
         noise backdoor for anything the extractor mis-classifies as
-        fact/preference/person instead of event. Scoring both stores with
-        the same relevance/availability formula (semantic candidates get
-        availability pinned to 1.0, since they never decay) means a
-        mis-classified noise turn still has to be genuinely relevant to
-        make the cut, same as anything in the episodic store.
+        fact/preference/person instead of event.
+
+        Semantic candidates are scored by relevance ALONE, not blended with
+        the episodic relevance/availability formula. Availability doesn't
+        vary for them (they never decay), so plugging a constant into that
+        formula doesn't add real information -- it just adds a flat,
+        unconditional bonus of (1 - relevance_weight) to every semantic
+        candidate regardless of actual relevance. Confirmed this concretely:
+        a misclassified noise turn landing in the semantic store scored
+        ~0.35-0.5 purely from that constant term, enough to outrank
+        genuinely relevant episodic candidates and reproduce a 90% noise
+        rate in a local repro. Scoring by relevance alone removes that
+        unconditional floor -- a semantic candidate still has to actually
+        match the query to compete.
         """
         semantic_pool = self.semantic_memory.search(query, top_k=top_k * 2)
         for r in semantic_pool:
             relevance = 1.0 - r.get("_distance", 0.0)
             r["_relevance"] = round(relevance, 6)
             r["current_salience"] = 1.0
-            r["_score"] = round(
-                DEFAULT_RELEVANCE_WEIGHT * relevance + (1 - DEFAULT_RELEVANCE_WEIGHT), 6
-            )
+            r["_score"] = round(relevance, 6)
 
         episodic_pool = hippo_retrieve(
             query, self.episodic_memory, self.episodic_memory.graph, self.current_turn, top_k * 2
