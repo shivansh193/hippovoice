@@ -15,6 +15,7 @@ pydantic>=2.0.0
 pytest>=8.0.0
 pytest-mock>=3.12.0
 python-dotenv>=1.0.0
+nltk>=3.8.0  # PorterStemmer for LoCoMo's real F1 scoring methodology
 # NeMo ASR — install separately on Colab:
 # pip install nemo_toolkit[asr]
 # Fish TTS — install separately on Colab:

@@ -1,41 +1,125 @@
 from benchmarks.locomo.evaluate import (
-    _answer_matches,
+    normalize_answer,
+    f1_score,
+    multi_hop_f1,
+    score_answer,
+    bin_f1_scores,
     build_qa_context,
     _flatten_conversation,
     rescore_details,
     _current_commit_hash,
     debug_extraction_for_turns,
+    MULTI_HOP_CATEGORY,
+    ADVERSARIAL_CATEGORY,
 )
 
 
-def test_exact_substring_match():
-    assert _answer_matches("the answer is transgender woman for sure", "transgender woman")
+# ── hand-verified ground truth ───────────────────────────────────────────────────
+# These four values were hand-derived against LoCoMo's actual published
+# evaluation.py source (fetched and quoted verbatim, not approximated) before
+# writing any code here -- per the principle that a reimplementation is only
+# trustworthy once validated against known-correct values, not just "looks
+# right". If the coded scorer doesn't reproduce these exactly, the scorer is
+# wrong and every downstream conclusion drawn from it is contaminated.
+
+def test_hand_verified_partial_credit_missing_specific_noun():
+    # "researched adoption" vs "adoption agencies" -- category 1 (multi-hop),
+    # but neither string contains a comma so multi_hop_f1 reduces to plain
+    # f1_score. Overlap = {adopt} (stemmed) -> precision=1/2, recall=1/2, F1=0.5.
+    assert multi_hop_f1("researched adoption", "adoption agencies") == 0.5
 
 
-def test_fuzzy_match_all_words_present():
-    assert _answer_matches("caroline researched adoption agencies last year", "adoption agencies")
+def test_hand_verified_multi_hop_credits_matched_subanswer_only():
+    # gold "Kickboxing, Taekwondo" vs predicted "yoga, kickboxing, and
+    # circuit training". Splits to predictions=[yoga, kickboxing, and
+    # circuit training] and ground_truths=[Kickboxing, Taekwondo].
+    # "Kickboxing" sub-answer: max F1 against all 3 prediction fragments ->
+    #   f1_score("kickboxing","Kickboxing")=1.0 (exact after normalize+stem)
+    #   -- the other two garbage fragments simply don't hurt this pairing.
+    # "Taekwondo" sub-answer: no fragment matches -> 0.
+    # mean(1.0, 0) = 0.5 -- NOT 0.33, which was an earlier hand-estimate
+    # made before fetching LoCoMo's actual verbatim multi-hop algorithm;
+    # this test locks in the corrected, verified value.
+    assert multi_hop_f1("yoga, kickboxing, and circuit training", "Kickboxing, Taekwondo") == 0.5
 
 
-def test_trailing_punctuation_does_not_break_fuzzy_match():
-    # Regression: "adoption." (with trailing period) must still match "adoption"
-    assert _answer_matches("caroline researched adoption agencies.", "adoption agencies")
+def test_hand_verified_partial_credit_from_shared_pronoun():
+    # "her family" vs "her mother" -- category 2 (non-multi-hop), plain
+    # f1_score. Overlap = {her} only -> precision=1/2, recall=1/2, F1=0.5.
+    # (Credit here comes from a shared pronoun, not real content overlap --
+    # illustrates the metric isn't free of its own noise, just less blind
+    # than a boolean matcher.)
+    assert f1_score("her family", "her mother") == 0.5
 
 
-def test_fuzzy_match_below_threshold_fails():
-    assert not _answer_matches("melanie painted a sunrise in the morning.", "2022")
+def test_hand_verified_zero_overlap_stays_zero():
+    # An honest "not in context" hedge shares no lexical content with the
+    # gold answer at all -- zero overlap, zero F1, same result a boolean
+    # matcher would give. The metric fix doesn't manufacture credit where
+    # none exists.
+    assert f1_score("caroline's identity is not provided in the context.", "transgender woman") == 0.0
 
 
-def test_partial_overlap_below_threshold_fails():
-    # Only 1 of 3 gold words present -- below the 0.7 overlap threshold
-    assert not _answer_matches("it happened in 2023 sometime", "7 may 2023")
+# ── normalize_answer ──────────────────────────────────────────────────────────
+
+def test_normalize_answer_strips_commas_articles_and_punctuation():
+    assert normalize_answer("The Adoption, Agencies.") == "adoption agencies"
 
 
-def test_empty_gold_is_trivial_substring_match():
-    # "" is a substring of everything in Python -- this is harmless in
-    # practice since run_locomo already skips QA pairs with an empty gold
-    # answer before ever calling _answer_matches.
-    assert _answer_matches("anything at all", "")
+def test_normalize_answer_removes_and_as_well_as_articles():
+    assert normalize_answer("yoga, kickboxing, and circuit training") == "yoga kickboxing circuit training"
 
+
+# ── f1_score ──────────────────────────────────────────────────────────────────
+
+def test_f1_score_exact_match_after_normalization():
+    assert f1_score("Kickboxing", "kickboxing.") == 1.0
+
+
+def test_f1_score_no_overlap_is_zero():
+    assert f1_score("completely unrelated text", "sweden") == 0.0
+
+
+# ── multi_hop_f1 ──────────────────────────────────────────────────────────────
+
+def test_multi_hop_f1_reduces_to_f1_score_for_non_comma_answers():
+    pred, gold = "she moved from sweden", "sweden"
+    assert multi_hop_f1(pred, gold) == f1_score(pred, gold)
+
+
+# ── score_answer (category dispatch) ─────────────────────────────────────────
+
+def test_score_answer_uses_multi_hop_for_category_1():
+    f1 = score_answer("yoga, kickboxing, and circuit training", "Kickboxing, Taekwondo", MULTI_HOP_CATEGORY)
+    assert f1 == 0.5
+
+
+def test_score_answer_does_not_split_commas_in_dates_for_other_categories():
+    # "19 January, 2023" must NOT be treated as two sub-answers ["19
+    # January", "2023"] for a non-multi-hop category -- that comma is
+    # date punctuation, not a list separator.
+    f1 = score_answer("19 january 2023", "19 January, 2023", category=2)
+    assert f1 == 1.0  # exact match once the comma is just stripped, not split on
+
+
+def test_score_answer_adversarial_category_checks_for_hedge_phrases():
+    assert score_answer("there is no information available", "adversarial answer", ADVERSARIAL_CATEGORY) == 1.0
+    assert score_answer("i think it is x", "adversarial answer", ADVERSARIAL_CATEGORY) == 0.0
+
+
+# ── bin_f1_scores ─────────────────────────────────────────────────────────────
+
+def test_bin_f1_scores_buckets_correctly():
+    details = [
+        {"f1": 0.0}, {"f1": 0.15},
+        {"f1": 0.2}, {"f1": 0.5}, {"f1": 0.69},
+        {"f1": 0.7}, {"f1": 1.0},
+    ]
+    bins = bin_f1_scores(details)
+    assert bins == {"near_zero": 2, "partial": 3, "high": 2}
+
+
+# ── build_qa_context / _flatten_conversation ─────────────────────────────────
 
 def test_build_qa_context_joins_contents():
     memories = [{"content": "fact one"}, {"content": "fact two"}]
@@ -74,33 +158,40 @@ def test_flatten_conversation_handles_missing_date():
 
 # ── rescore_details ────────────────────────────────────────────────────────────
 
-def test_rescore_details_recomputes_accuracy_without_rerunning():
+def test_rescore_details_recomputes_f1_without_rerunning():
     details = [
-        {"question": "q1", "gold": "adoption agencies", "predicted": "researched adoption.", "correct": False},
-        {"question": "q2", "gold": "2022", "predicted": "no year mentioned here", "correct": False},
+        {"question": "q1", "gold": "adoption agencies", "predicted": "researched adoption.",
+         "category": MULTI_HOP_CATEGORY},
+        {"question": "q2", "gold": "2022", "predicted": "no year mentioned here", "category": 2},
     ]
     result = rescore_details(details)
     assert result["total"] == 2
-    # q1 now flips: 1/2 gold words present is still < 0.7, so it stays False --
-    # this checks rescoring runs the real matcher, not that it always improves.
-    assert result["details"][0]["correct"] == _answer_matches("researched adoption.", "adoption agencies")
-    assert result["details"][1]["correct"] is False
-    assert result["correct"] == sum(d["correct"] for d in result["details"])
+    assert result["details"][0]["f1"] == 0.5
+    assert result["details"][1]["f1"] == 0.0
+    assert result["total_f1"] == 0.5
+    assert result["avg_f1"] == 0.25
+    assert result["bins"] == {"near_zero": 1, "partial": 1, "high": 0}
 
 
 def test_rescore_details_empty_list():
     result = rescore_details([])
-    assert result == {"accuracy": 0.0, "total": 0, "correct": 0, "details": []}
+    assert result == {
+        "avg_f1": 0.0, "total": 0, "total_f1": 0.0,
+        "bins": {"near_zero": 0, "partial": 0, "high": 0}, "details": [],
+    }
 
 
-def test_rescore_details_flips_previously_wrong_answer():
-    # Full gold phrase now present verbatim -- should flip to correct.
+def test_rescore_details_backfills_missing_category_from_dataset():
+    # Old checkpoint format has no "category" field at all -- must look it
+    # up from the real dataset by matching question text, rather than
+    # crashing or silently mis-scoring a multi-hop question as non-multi-hop.
     details = [
-        {"question": "q", "gold": "transgender woman", "predicted": "she is a transgender woman", "correct": False},
+        {"question": "What did Caroline research?", "gold": "adoption agencies",
+         "predicted": "researched adoption."},
     ]
     result = rescore_details(details)
-    assert result["details"][0]["correct"] is True
-    assert result["correct"] == 1
+    assert result["details"][0]["category"] == MULTI_HOP_CATEGORY
+    assert result["details"][0]["f1"] == 0.5
 
 
 # ── checkpoint fingerprint / commit hash ────────────────────────────────────────
