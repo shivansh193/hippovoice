@@ -6,6 +6,54 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Confirmed via a full-store rank dump on a real Kaggle run: the bare-name
+  fix was necessary but nowhere near sufficient -- the real problem is
+  massive extraction over-generation, not a narrow content-quality edge
+  case.** After the bare-name fix (below), re-tracing "What is Caroline's
+  identity?" still showed low-information Caroline reaction fragments in
+  the top 5 (`"It stands for freedom and being real."`, `"What gave you the
+  idea?"`, `"..."`) instead of the real fact. Ran a direct diagnostic: fed
+  the same 419-turn conversation through a fresh pipeline (real LLM, no
+  benchmark harness) and searched the *entire* semantic store, not just the
+  top-5, for the actual query. Findings:
+  - **The semantic store held 700 entries from 419 turns** (~1.67
+    memories/turn) -- for a mostly-casual chat conversation, nearly every
+    single turn produced at least one "durable fact." Manually scanning the
+    ranked list, the overwhelming majority are pure conversational filler
+    that never should have been extracted at all: `"Thanks, Caroline!"`,
+    `"Congrats Caroline!"`, `"Agreed, Mel!"`, `"That's so funny!"`,
+    dozens of near-duplicate reaction variants.
+  - **The actual target fact ("Caroline: The transgender stories were so
+    inspiring!") ranked 45th out of 700** by pure cosine relevance to "What
+    is Caroline's identity?" A second phrasing of the same fact ("I mentor
+    a transgender teen just like me") ranked 65th. This is not a "just
+    outside top-5, widen top_k a bit" problem -- 44 other Caroline
+    utterances, many only thematically adjacent (art/self-expression turns
+    of phrase that happen to share vocabulary like "identity"), scored
+    higher than the fact that actually answers the question.
+  - Conclusion: this cannot be fixed by tuning candidate-pool size or
+    reranking weights alone, because the correct answer is genuinely
+    outranked by a large volume of near-duplicate low-value content, not
+    narrowly missed. The root cause is upstream, at extraction: the prompt
+    never told the model to *withhold* memories for turns that are just
+    reactions/small talk, so on a casual-chat dataset like LoCoMo it
+    extracts something from almost every turn.
+  - Fix attempted (not yet validated on a real run): tightened
+    `EXTRACTION_PROMPT` in `memory/extractor.py` to explicitly instruct the
+    model to return `[]` for turns that are only a greeting, acknowledgment,
+    thanks, compliment, reaction, or question, with two few-shot examples
+    (one empty-array reaction turn, one real fact turn) to anchor the
+    distinction. The 2-word minimum content filter (below) stays as
+    defense-in-depth, but the real fix has to stop the junk from being
+    created in the first place, not out-rank it after the fact. **Next
+    step**: before spending a full LoCoMo GPU run on this, cheaply validate
+    against the real model already loaded in a Kaggle session by calling
+    `extract_memories` directly on a handful of known-junk turns (`"Caroline:
+    Thanks, Mel!"`) and known-real-fact turns from this exact conversation,
+    confirming the new prompt actually suppresses the former without
+    dropping the latter -- only then re-ingest and re-check where the
+    target fact ranks, and only then re-run the full benchmark.
+
 - **Confirmed via `print_qa_trace` on a real run: bare-name degenerate
   extractions were crowding out real facts in the semantic store.** Traced
   "What is Caroline's identity?" and "What is Caroline's relationship
