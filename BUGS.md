@@ -6,6 +6,44 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Rung 2 implemented: episodic retrieval reranks by relevance ×
+  availability instead of pure salience.** `hippo_retrieve()` now computes,
+  per candidate: relevance (cosine similarity between query and memory
+  content) and availability (`current_salience` from the existing decay
+  model, log-normalized to `[0, 1]` anchored at `FORGET_THRESHOLD` -- see
+  `_availability_score`), combined via a fixed weighted sum
+  (`relevance_weight=0.65` default). Two simpler designs were tried and
+  empirically rejected first:
+  - Raw multiplicative/additive blend on unnormalized values: fails
+    outright for the reason already quantified (availability spans ~1e-13
+    to ~1+, so a fresh irrelevant memory still swamps an old relevant one).
+  - Reciprocal rank fusion (rank position, not magnitude): fixes the scale
+    problem but overcorrects for small candidate pools -- with only 2-3
+    candidates, rank 0 vs rank 1 barely differs regardless of whether the
+    true availability gap is 1% or 1,000,000%, so a genuinely dominant
+    signal couldn't reliably win. Verified this failure directly with a
+    real test case before switching to log-normalized weighted sum.
+
+  Caught and fixed two real regressions while building this:
+  - Computing relevance via one `embedder.encode()` call *per candidate*
+    turned retrieval latency from a few ms into ~5.5s for a 500-memory
+    store. Fixed by batch-encoding the query + all candidate contents in a
+    single call.
+  - The first test written to validate "availability matters" used two
+    memories that turned out not to be equally relevant to the test query
+    (phrasing/lexical overlap differed enough that relevance alone decided
+    the outcome) -- the test's premise was wrong, not the ranking design.
+    Verified empirically (printed actual relevance/availability numbers)
+    before rewriting the test with phrasing that's genuinely
+    comparable in relevance.
+
+  **Not yet verified on a real Colab run** -- next step is exactly that,
+  now that both Rung 1 (store split) and Rung 2 (relevance-aware episodic
+  reranking) are in place; these two together should meaningfully improve
+  both the identity/preference category (Rung 1) and the "old but relevant
+  beats new but irrelevant" dynamic for events (Rung 2), though date
+  questions specifically still depend on whether the LLM's own extraction
+  preserves the (now-available) session date into the memory's content.
 - **Rung 1 implemented: split memory store by type (semantic facts vs
   episodic events).** `HippoVoicePipeline` now holds `semantic_memory`
   (`fact`/`preference`/`person` types -- never decays, survives regardless
