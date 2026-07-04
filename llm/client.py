@@ -25,13 +25,18 @@ class LLMClient:
         device: str | None = None,
         load_in_4bit: bool = True,
     ):
-        self.model_name = model_name
         self._backend = "mlx" if _IS_MAC else "transformers"
 
         if self._backend == "mlx":
-            self._init_mlx(model_name or "mlx-community/Qwen3-0.6B-4bit")
+            # self.model_name must reflect what's actually loaded, not the
+            # raw (possibly None) constructor argument -- otherwise
+            # llm.model_name prints "None" even when a real fallback model
+            # was loaded, hiding which model a run actually used.
+            self.model_name = model_name or "mlx-community/Qwen3-0.6B-4bit"
+            self._init_mlx(self.model_name)
         else:
-            self._init_transformers(model_name or "Qwen/Qwen3-0.6B", device, load_in_4bit)
+            self.model_name = model_name or "Qwen/Qwen3-0.6B"
+            self._init_transformers(self.model_name, device, load_in_4bit)
 
     # ── MLX backend (Apple Silicon) ───────────────────────────────────────────
 
