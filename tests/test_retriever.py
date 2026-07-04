@@ -144,6 +144,35 @@ def test_retrieve_empty_store():
     assert results == []
 
 
+def test_decay_lambda_override_keeps_old_memories_available():
+    # Confirms hippo_retrieve actually uses a custom decay_lambda rather than
+    # always falling back to the module default. Confirmed on a real LoCoMo
+    # run that the default (tuned for ~90-100 turn conversations) crushes
+    # availability to near-zero long before a 369-663 turn conversation
+    # ends -- two separate stores (not two calls on the same store) since
+    # hippo_retrieve increments recall_count as a side effect, which would
+    # otherwise contaminate the second call's salience computation.
+    def _make_store(name):
+        mem = HippoMemory(collection_name=name)
+        mem.add({
+            "content": "the user mentioned their dog Max",
+            "emotion": {"label": "neutral", "intensity": 0.1},
+            "base_weight": 1.0, "recall_count": 0, "turn_created": 0,
+        }, "old_mem")
+        return mem
+
+    default_mem = _make_store("test_decay_lambda_default")
+    default_results = hippo_retrieve("tell me about Max", default_mem, default_mem.graph, current_turn=600, top_k=1)
+
+    scaled_mem = _make_store("test_decay_lambda_scaled")
+    scaled_results = hippo_retrieve(
+        "tell me about Max", scaled_mem, scaled_mem.graph, current_turn=600, top_k=1, decay_lambda=0.001
+    )
+
+    assert default_results[0]["current_salience"] < 0.01, "Default decay_lambda should crush availability by turn 600"
+    assert scaled_results[0]["current_salience"] > 0.3, "A much smaller decay_lambda should keep this available"
+
+
 def test_retrieval_latency_500_memories():
     mem = HippoMemory(collection_name="latency_test_500")
     graph = mem.graph

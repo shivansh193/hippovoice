@@ -179,6 +179,8 @@ def run_locomo(
     checkpoint_path: str | None = None,
     verbose: bool = True,
     batch_size: int = 50,
+    decay_lambda: float = 0.001,
+    relevance_weight: float = 0.85,
 ) -> dict:
     """
     Run LoCoMo evaluation.
@@ -188,6 +190,18 @@ def run_locomo(
          pipeline's memory.
       2. For each QA pair, retrieve context and ask the LLM to answer.
       3. Compare against ground truth (exact match + fuzzy).
+
+    `decay_lambda`/`relevance_weight` default to values tuned for LoCoMo's
+    conversation length (369-663 turns), not HippoVoicePipeline's own
+    defaults (tuned for ~90-100 turn conversations). Confirmed directly:
+    with the pipeline default decay rate, even a strongly emotion-boosted
+    episodic memory crosses FORGET_THRESHOLD by ~turn 173 and gets
+    physically deleted -- so almost nothing survives to the end of a real
+    LoCoMo conversation regardless of extraction or retrieval quality.
+    decay_lambda=0.001 keeps a plain neutral memory above COMPRESS_THRESHOLD
+    even at 663 turns elapsed; relevance_weight=0.85 (up from the pipeline
+    default of 0.65) leans on relevance to do more of the ranking work now
+    that availability barely discriminates between memories any more.
 
     `max_qa_per_conversation` caps QA pairs per conversation -- useful for a
     cheap smoke test (a full run is ~150-250 QA pairs x 10 conversations,
@@ -245,6 +259,8 @@ def run_locomo(
         "num_conversations": num_conversations,
         "max_qa_per_conversation": max_qa_per_conversation,
         "include_adversarial": include_adversarial,
+        "decay_lambda": decay_lambda,
+        "relevance_weight": relevance_weight,
         "commit": _current_commit_hash(),
     }
 
@@ -279,7 +295,10 @@ def run_locomo(
             continue
 
         # Fresh pipeline per conversation -- memory shouldn't leak across conversations
-        conv_pipeline = HippoVoicePipeline(llm_client=pipeline.llm, text_only=True)
+        conv_pipeline = HippoVoicePipeline(
+            llm_client=pipeline.llm, text_only=True,
+            decay_lambda=decay_lambda, relevance_weight=relevance_weight,
+        )
 
         turns = _flatten_conversation(conv["conversation"])
         if verbose:

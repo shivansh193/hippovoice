@@ -1,4 +1,4 @@
-from memory.scorer import compute_salience
+from memory.scorer import compute_salience, DEFAULT_DECAY_LAMBDA
 
 COMPRESS_THRESHOLD = 0.25
 FORGET_THRESHOLD = 0.08
@@ -8,6 +8,7 @@ def apply_forgetting_cycle(
     memories: list[dict],
     current_turn: int,
     llm_client=None,
+    decay_lambda: float = DEFAULT_DECAY_LAMBDA,
 ) -> tuple[list[dict], list[dict]]:
     """
     Partition memories into active and forgotten based on current salience.
@@ -15,6 +16,15 @@ def apply_forgetting_cycle(
     Salience < FORGET_THRESHOLD   → forgotten (removed from store)
     Salience < COMPRESS_THRESHOLD → compressed (merged into one summary entry)
     Otherwise                     → active (unchanged)
+
+    `decay_lambda` defaults to the value tuned for ~90-100 turn conversations
+    (see memory/scorer.py). Confirmed on a real LoCoMo run that this default
+    is wrong for 369-663 turn conversations: even a strongly emotion-boosted
+    memory crosses FORGET_THRESHOLD by ~turn 173, so almost every episodic
+    memory is physically deleted well before a question about it is ever
+    asked, independent of extraction or retrieval quality. Callers ingesting
+    much longer conversations should pass a smaller decay_lambda explicitly
+    rather than relying on this default.
 
     Returns (active_memories, forgotten_memories).
     The returned active list may include a synthetic compressed entry.
@@ -30,6 +40,7 @@ def apply_forgetting_cycle(
             emotion=m.get("emotion", {"label": "neutral", "intensity": 0.0}),
             recall_count=m.get("recall_count", 0),
             turns_elapsed=turns_elapsed,
+            decay_lambda=decay_lambda,
         )
         m = {**m, "current_salience": round(score, 4)}
 

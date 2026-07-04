@@ -1,6 +1,6 @@
 import math
 
-from memory.scorer import compute_salience
+from memory.scorer import compute_salience, DEFAULT_DECAY_LAMBDA
 from memory.store import HippoMemory, AssociationGraph, _cosine_similarity
 from memory.decay import FORGET_THRESHOLD
 
@@ -87,6 +87,7 @@ def hippo_retrieve(
     top_k: int = 5,
     graph_expand_seeds: int = 10,
     relevance_weight: float = DEFAULT_RELEVANCE_WEIGHT,
+    decay_lambda: float = DEFAULT_DECAY_LAMBDA,
 ) -> list[dict]:
     """
     Full HippoRAG retrieval: seed → graph walk → rerank by relevance × availability.
@@ -134,6 +135,13 @@ def hippo_retrieve(
 
     Side effect: increments recall_count on each retrieved memory so future
     salience calculations reflect the reinforcement.
+
+    `decay_lambda` defaults to the value tuned for ~90-100 turn conversations.
+    Callers ingesting much longer conversations (hundreds of turns) should
+    pass a smaller value explicitly -- otherwise availability collapses to
+    ~0 for virtually everything long before top_k*4 candidates are even
+    considered, and relevance ends up reranking a pool that's already been
+    hollowed out by decay rather than genuinely competing against it.
     """
     seed_ids = retrieve_seeds(query, memory, top_k=max(top_k * 4, 15))
     expanded_ids = expand_via_graph(seed_ids[:graph_expand_seeds], graph)
@@ -160,6 +168,7 @@ def hippo_retrieve(
             emotion=m.get("emotion", {"label": "neutral", "intensity": 0.0}),
             recall_count=m.get("recall_count", 0),
             turns_elapsed=turns_elapsed,
+            decay_lambda=decay_lambda,
         )
         relevance = _cosine_similarity(query_emb, mem_emb)
         score = relevance_weight * relevance + (1 - relevance_weight) * _availability_score(availability)
