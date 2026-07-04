@@ -113,6 +113,48 @@ def _flatten_conversation(conv: dict) -> list[str]:
     return turns
 
 
+def debug_extraction_for_turns(conv: dict, dia_ids: list[str], llm_client) -> list[dict]:
+    """
+    Run real extraction on specific dia_id turns from a conversation (by
+    id, not "first N turns" -- a turn evidencing a QA pair can be anywhere,
+    e.g. deep into session 2), and return exactly what the LLM extracted --
+    content and type -- without ingesting into any pipeline/store.
+
+    Useful for directly answering "did the model even extract this fact,
+    and how did it classify it?" for a specific known evidence turn, e.g.
+    checking whether an implicitly-stated identity fact ("the transgender
+    stories were so inspiring") gets extracted at all, and whether it's
+    tagged as a durable fact/person/preference (semantic store, never
+    decays) or an event (episodic store, subject to forgetting) --
+    resolving that with real data instead of guessing from final QA
+    accuracy alone, which conflates extraction quality with everything
+    downstream of it.
+    """
+    from memory.extractor import extract_memories_batch
+
+    turns_by_id = {}
+    for key in conv["conversation"]:
+        if key.startswith("session_") and not key.endswith("_date_time"):
+            session_num = key.split("_")[1]
+            date = conv["conversation"].get(f"session_{session_num}_date_time", "")
+            date_prefix = f"[{date}] " if date else ""
+            for turn in conv["conversation"][key]:
+                text = (turn.get("text") or "").strip()
+                if text:
+                    turns_by_id[turn["dia_id"]] = f"{date_prefix}{turn.get('speaker', '')}: {text}"
+
+    found_ids = [d for d in dia_ids if d in turns_by_id]
+    selected_turns = [turns_by_id[d] for d in found_ids]
+    if not selected_turns:
+        return []
+
+    batch_memories = extract_memories_batch(selected_turns, llm_client)
+    return [
+        {"dia_id": d, "turn": t, "extracted": m}
+        for d, t, m in zip(found_ids, selected_turns, batch_memories)
+    ]
+
+
 def run_locomo(
     pipeline=None,
     llm_client=None,
