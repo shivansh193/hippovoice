@@ -134,13 +134,46 @@ def test_memories_missing_content_are_dropped():
     assert memories[0]["content"] == "likes tea"
 
 
+def test_bare_name_content_is_dropped():
+    # Regression, confirmed on a real Colab/Kaggle run: on a low-content
+    # turn (a greeting, a short reply), the real LLM sometimes lazily emits
+    # content that's just the speaker/subject's bare name instead of
+    # correctly returning nothing. A "person"-type memory with
+    # content="Caroline" never decays (semantic store) and is a
+    # near-perfect cosine match for any query mentioning that same name --
+    # confirmed these crowded out genuinely informative facts about the
+    # same person in real retrieved context (five "Caroline"-only results,
+    # zero substance, for "What is Caroline's identity?").
+    from unittest.mock import MagicMock
+    llm = MagicMock()
+    llm.generate.return_value = (
+        '[{"content": "Caroline", "entity": "Caroline", "type": "person"}, '
+        '{"content": "Caroline is a transgender woman", "entity": "Caroline", "type": "person"}]'
+    )
+    memories = extract_memories("something", llm)
+    assert len(memories) == 1
+    assert memories[0]["content"] == "Caroline is a transgender woman"
+
+
+def test_two_word_content_is_kept():
+    # The bare-name filter should only reject single-token content -- a
+    # genuinely short but real fact ("single mother", "transgender woman")
+    # must still pass through.
+    from unittest.mock import MagicMock
+    llm = MagicMock()
+    llm.generate.return_value = '[{"content": "single mother", "type": "fact"}]'
+    memories = extract_memories("something", llm)
+    assert len(memories) == 1
+    assert memories[0]["content"] == "single mother"
+
+
 def test_non_dict_items_in_llm_response_are_skipped():
     from unittest.mock import MagicMock
     llm = MagicMock()
-    llm.generate.return_value = '["just a string", {"content": "ok", "type": "fact"}]'
+    llm.generate.return_value = '["just a string", {"content": "likes tea", "type": "fact"}]'
     memories = extract_memories("something", llm)
     assert len(memories) == 1
-    assert memories[0]["content"] == "ok"
+    assert memories[0]["content"] == "likes tea"
 
 
 # ── extract_memories_batch ──────────────────────────────────────────────────────
