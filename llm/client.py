@@ -32,10 +32,10 @@ class LLMClient:
             # raw (possibly None) constructor argument -- otherwise
             # llm.model_name prints "None" even when a real fallback model
             # was loaded, hiding which model a run actually used.
-            self.model_name = model_name or "mlx-community/Qwen3-0.6B-4bit"
+            self.model_name = model_name or "mlx-community/Qwen3-4B-4bit"
             self._init_mlx(self.model_name)
         else:
-            self.model_name = model_name or "Qwen/Qwen3-0.6B"
+            self.model_name = model_name or "Qwen/Qwen3-4B"
             self._init_transformers(self.model_name, device, load_in_4bit)
 
     # ── MLX backend (Apple Silicon) ───────────────────────────────────────────

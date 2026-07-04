@@ -4,33 +4,29 @@ import numpy as np
 # Emotion labels the system recognises
 VALID_LABELS = {"neutral", "joy", "sadness", "fear", "anger", "surprise", "disgust"}
 
+# Deliberately simple, minimal few-shot set. Confirmed on a real run that a
+# 0.6B model can't reliably execute nuanced conditional extraction rules
+# regardless of wording -- three rounds of increasingly elaborate prompts
+# each fixed one failure mode (junk pollution, then general under-extraction,
+# then emotional-turn under-extraction) while introducing another, all while
+# greedy decoding collapsed to one canned answer across wildly different
+# inputs. Qwen3-4B got every test case right on this exact simple prompt,
+# with no extra scaffolding needed -- the reliability problem was model
+# capacity, not prompt engineering. This prompt is validated against
+# Qwen3-4B specifically; a smaller model may need the extra scaffolding
+# again (see BUGS.md for the full trace of what didn't work and why).
 EXTRACTION_PROMPT = """\
-Extract distinct, self-contained memory fragments from this conversation turn.
-Extract a fragment whenever the turn reveals any new fact, event, opinion,
-feeling, or plan about a person -- no matter how it's phrased, how much
-emotion is attached, or whether it's stated directly or only implied.
-
-Only return an empty array if, after removing names and pleasantries, there
-is truly nothing left: a bare greeting ("Hi!"), a bare acknowledgment
-("Thanks!", "Agreed.", "Congrats!"), or a question with no statement
-attached. A turn describing something upsetting or emotional that happened to
-someone is NOT a bare reaction -- it is an event, and must be extracted.
+Extract any noteworthy facts, preferences, plans, or events mentioned in this turn.
+If it's just a greeting, thanks, or acknowledgment with nothing else in it, return an empty array.
 
 Return ONLY a JSON array — no prose, no markdown fences.
-
 Schema: [{{"content": "...", "entity": "...", "type": "fact|preference|event|person"}}]
 
-Example input: Caroline: Thanks, Mel!
+Example input: Thanks, Mel!
 Example output: []
 
-Example input: Caroline: I love hiking on weekends with my dog.
-Example output: [{{"content": "Caroline enjoys hiking on weekends with her dog", "entity": "Caroline", "type": "preference"}}]
-
-Example input: Jon: I just found out I have to move out of my apartment in two weeks because the building got sold, and I'm honestly panicking a bit.
-Example output: [{{"content": "Jon has to move out of his apartment within two weeks because the building was sold", "entity": "Jon", "type": "event"}}]
-
-Example input: Jon: I've started going to the gym again, it helps clear my head after a rough day at work.
-Example output: [{{"content": "Jon goes to the gym to cope with stress from work", "entity": "Jon", "type": "preference"}}]
+Example input: My best friend told me she's moving across the country permanently.
+Example output: [{{"content": "Best friend is moving across the country permanently", "entity": "user", "type": "event"}}]
 
 Turn: {turn}"""
 

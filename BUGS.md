@@ -6,6 +6,48 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Root cause of the entire extraction-prompt saga (three rounds, see the
+  two entries below): 0.6B model capacity, not prompt wording. Switched the
+  default model to Qwen3-4B and simplified the prompt back down.** After
+  round 3 (`ee04302`) still collapsed to an identical `[]` for every input
+  regardless of content (confirmed via raw pre-parse output -- not a
+  parsing bug, a genuine deliberate model decision), tested whether
+  `LLMClient.generate()` was accidentally stateful (accumulating
+  conversation history across the many calls in a long session) -- ruled
+  out by reading `llm/client.py`: each call builds a fresh `chat` list from
+  scratch, no persisted state. Tested a much simpler prompt (one rule, one
+  skip example, one keep example) on the same 0.6B model -- still collapsed
+  to identical `[]` output for all 5 test turns, including an unambiguous
+  preference statement. Ruled out prompt complexity as the cause too.
+
+  Loaded Qwen3-4B (4-bit, ~3GB VRAM) as a separate model in the same
+  session and ran the exact same 5 test turns through the exact same
+  simplified prompt: it got every single one right on the first try --
+  correctly skipped a mundane weather turn and a bare "Thanks, Mel!",
+  correctly extracted a car accident, a friend moving away (with the
+  attached emotional state as a separate fragment), and a hiking
+  preference. No extra scaffolding needed. This is decisive: three rounds
+  of increasingly careful 0.6B prompt engineering each fixed one failure
+  mode while introducing another (over-extract junk -> under-extract
+  everything -> under-extract specifically emotional turns -> under-extract
+  everything again with a simpler prompt) because the actual constraint was
+  never the wording -- a 0.6B model with greedy decoding appears to resolve
+  this kind of nuanced conditional judgment as an unstable, prompt-surface-
+  sensitive coin flip that swings the SAME direction for every input in a
+  session rather than genuinely differentiating per-turn content.
+
+  Fixed: adopted the simple prompt (validated against Qwen3-4B, documented
+  in `memory/extractor.py` as such) and switched the default model
+  everywhere -- `llm/client.py`'s fallback default (both transformers and
+  mlx backends) and `colab.ipynb`'s Load LLM cell now default to
+  `Qwen/Qwen3-4B` with `load_in_4bit=True`, matching what the notebook's
+  own header table had said all along (a mismatch noted as an open item
+  earlier in this file, now resolved by this decision). Real cost: slower
+  per-turn extraction and more VRAM than 0.6B (still comfortably within a
+  T4's 15GB). **Not yet validated with a full benchmark re-run** -- next
+  step is a full signal/noise + LoCoMo run on Qwen3-4B to confirm this
+  actually holds at scale, not just on 5 hand-picked probe sentences.
+
 - **Confirmed on a real (verified-clean, post-restart) Kaggle run: the
   rebalanced prompt (previous entry, `ff99a7b`) fixed the LoCoMo-side
   overcorrection but broke the signal/noise benchmark completely --
