@@ -6,6 +6,42 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **The entire LoCoMo scoring methodology was wrong -- replaced with
+  LoCoMo's actual published F1 scorer.** `_answer_matches` was a home-grown
+  boolean matcher (substring or >=70% word overlap), never validated
+  against what the real benchmark uses. Fetched LoCoMo's actual
+  `evaluation.py` from source: it uses stemmed (Porter), normalized,
+  token-level F1 (SQuAD-style), category-branched -- category 1 (multi-hop)
+  splits both prediction and gold on commas and takes mean-of-max F1 across
+  sub-answers; categories 2/3/4 use plain undecomposed F1; category 5
+  (adversarial) is a binary "not mentioned" check. Critically, naively
+  comma-splitting for ALL categories (rather than just category 1) would be
+  wrong: many category-2 date answers ("19 January, 2023") contain a comma
+  as punctuation, not a list separator -- confirmed empirically that many
+  comma-containing golds are NOT category 1. Implemented `normalize_answer`,
+  `f1_score`, `multi_hop_f1`, `score_answer` (category dispatcher) as exact
+  reproductions, validated against four values hand-derived directly from
+  the fetched source *before* writing any code (one of these hand
+  derivations was itself wrong on the first pass -- estimated 0.33 for a
+  multi-hop case using a naive single-blob token-F1 instead of the actual
+  split-and-max-per-subanswer algorithm; recomputing with the verbatim
+  algorithm gives 0.5. Caught by insisting on validating against source
+  rather than trusting estimation, which is exactly the discipline this
+  whole exercise was arguing for). All four now pass as tests.
+
+  **Re-scored the existing 45-prediction checkpoint with zero new LLM
+  calls**: avg F1 = 0.0599, bins = {near_zero: 40, partial: 5, high: 0}.
+  This settles whether the old boolean matcher was hiding real progress --
+  mostly no. 40/45 questions score below 0.2 F1 (genuinely wrong, not just
+  strictly scored), 0 score above 0.7 (not one clean win). The metric fix
+  is real and necessary (this project can't credibly compare against
+  Mem0/A-MEM's published LoCoMo numbers using a made-up matcher), but it
+  doesn't rescue the result -- 6% average F1 is a genuine, low floor. The
+  bin shape (mass in near_zero, not the 0.2-0.7 middle) points at
+  retrieval-plumbing/generation-confabulation as the dominant failure mode,
+  not matcher-strictness -- makes the planned Rome/downtown trace (was
+  "Rome" ever actually in retrieved context?) more important, not less.
+
 - **Confirmed on Kaggle: both retrieval regression fixes actually worked.**
   Full signal/noise rerun (commit `c486468`): HippoVoice 20.0% noise
   (signal=8, noise=2) vs NaiveRAG 30%, Mem0-style 30%, AMem-style 10% --
