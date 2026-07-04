@@ -6,10 +6,23 @@ VALID_LABELS = {"neutral", "joy", "sadness", "fear", "anger", "surprise", "disgu
 
 EXTRACTION_PROMPT = """\
 Extract distinct, self-contained memory fragments from this conversation turn.
-Each fragment must be a single fact, preference, or event worth remembering long-term.
+Each fragment must be a single fact, preference, or event worth remembering
+long-term about a specific person.
+
+Skip turns that are only a greeting, acknowledgment, thanks, compliment,
+reaction, or question -- these carry no durable information and must produce
+an empty array. Only extract when the turn states something new and specific
+about a person: an identity, belief, plan, relationship, preference, or event.
+
 Return ONLY a JSON array — no prose, no markdown fences.
 
 Schema: [{{"content": "...", "entity": "...", "type": "fact|preference|event|person"}}]
+
+Example input: Caroline: Thanks, Mel!
+Example output: []
+
+Example input: Caroline: I'm thrilled to make a family for kids who need one. It'll be tough as a single parent, but I'm up for the challenge!
+Example output: [{{"content": "Caroline is planning to adopt and become a single parent", "entity": "Caroline", "type": "preference"}}]
 
 Turn: {turn}"""
 
