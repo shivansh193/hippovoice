@@ -250,6 +250,17 @@ Add to this list; don't fix silently in passing.
 
 ## Open — found on first real (non-mocked, T4) Colab run
 
+- **Not using multi-GPU parallelism when multiple GPUs are available (e.g.
+  Kaggle's T4 x2).** `LLMClient`/`generate_batch` only ever runs on a single
+  device -- `device_map="auto"` may spread model layers across both GPUs if
+  the framework decides to, but there's no explicit data-parallel batching
+  across devices (e.g. splitting a batch of turns across both T4s and
+  running them concurrently). For a model this small, a single T4 already
+  has spare capacity, so the bigger win would be *using the extra GPU for a
+  second concurrent batch* rather than just having it sit idle. Worth
+  revisiting if/when GPU-hours become the binding constraint again -- not
+  urgent right now, but a real efficiency gap once there's a lot more to
+  run (LongMemEval, full 10-conversation LoCoMo runs, etc.).
 - Real LLM extraction behavior differs meaningfully from the deterministic
   `passthrough_llm` test mock — the mock always extracts exactly one memory
   per turn verbatim; a real LLM may (a) return zero memories for a boring
