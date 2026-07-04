@@ -84,3 +84,20 @@ def test_empty_input():
     active, forgotten = apply_forgetting_cycle([], current_turn=10)
     assert active == []
     assert forgotten == []
+
+
+def test_smaller_decay_lambda_keeps_long_conversation_memories_active():
+    # Same scenario as test_neutral_memories_forgotten_after_many_turns, but
+    # at a scale representative of a real LoCoMo conversation (hundreds of
+    # turns, not 80). Confirmed on a real run: the default decay_lambda
+    # forgets virtually everything long before a 369-663 turn conversation
+    # ends, regardless of extraction/retrieval quality -- callers ingesting
+    # conversations at that scale must override decay_lambda explicitly.
+    memories = _make_memories(5, "neutral", 0.01)
+
+    active_default, forgotten_default = apply_forgetting_cycle(memories, current_turn=600)
+    assert len(forgotten_default) == 5, "Default decay_lambda should still forget these at turn 600"
+
+    active_scaled, forgotten_scaled = apply_forgetting_cycle(memories, current_turn=600, decay_lambda=0.001)
+    assert len(forgotten_scaled) == 0, "A much smaller decay_lambda should keep these alive at turn 600"
+    assert len(active_scaled) == 5

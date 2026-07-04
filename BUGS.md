@@ -6,6 +6,56 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Confirmed on a real run with Qwen3-4B (extraction now fully working,
+  see entry below): the LoCoMo score didn't move at all (5.0% avg F1,
+  bins near-identical to every prior run this session, including the ones
+  with badly broken extraction). Root cause: episodic decay_lambda was
+  never actually the extraction problem's fault -- it was tuned for
+  ~90-100 turn conversations and physically deletes almost every episodic
+  memory well before a 369-663 turn LoCoMo conversation ends, independent
+  of how good extraction or generation are.** Quantified: even a strongly
+  emotion-boosted memory (fear, intensity 0.9) crosses FORGET_THRESHOLD
+  (0.08) by ~turn 173; a plain neutral memory crosses it by ~turn 50. Every
+  single run this session shows the same pattern in the near-zero bin --
+  overwhelmingly date/temporal questions where the model correctly says
+  "the context does not provide information," which isn't a generation
+  failure, it's the episodic memory literally not existing anymore by the
+  time the question is asked. This was flagged as an open, undecided design
+  question early in this session ("treat long multi-session conversations
+  as genuinely out of scope... rather than something to silently pick
+  without discussion") and never revisited until now.
+
+  Fixed by making both decay_lambda and episodic relevance_weight
+  explicitly overridable rather than hardcoded module constants everywhere:
+  - `memory/decay.py::apply_forgetting_cycle` and
+    `memory/retriever.py::hippo_retrieve` both now accept a `decay_lambda`
+    parameter (default unchanged, so every existing caller -- signal/noise,
+    tests, Voice Test -- behaves identically unless it opts in).
+  - `HippoVoicePipeline.__init__` accepts `decay_lambda`/`relevance_weight`
+    (default `None` = module defaults, same reasoning).
+  - `run_locomo()` defaults these to `decay_lambda=0.001,
+    relevance_weight=0.85` -- LoCoMo-scale values, not the pipeline's
+    short-conversation defaults, since every LoCoMo conversation is long by
+    construction. `decay_lambda=0.001` keeps a plain neutral memory above
+    COMPRESS_THRESHOLD even at 663 turns elapsed (versus ~1e-14 under the
+    old default); `relevance_weight=0.85` (up from 0.65) leans harder on
+    relevance now that availability barely discriminates between memories
+    any more. Both values added to the checkpoint fingerprint so a stale
+    checkpoint from a different decay/relevance setting can't be silently
+    reused.
+  - `colab.ipynb`'s LoCoMo cell surfaces `DECAY_LAMBDA`/`RELEVANCE_WEIGHT`
+    as visible, tunable constants (matching `NUM_CONVERSATIONS` etc.) even
+    though they now match `run_locomo()`'s own defaults, so they're easy to
+    see and adjust without digging into source.
+
+  Added local (zero-GPU) regression tests confirming the parameter actually
+  threads through end-to-end: `test_decay.py::
+  test_smaller_decay_lambda_keeps_long_conversation_memories_active`,
+  `test_retriever.py::test_decay_lambda_override_keeps_old_memories_available`,
+  `test_pipeline.py::
+  test_decay_lambda_override_prevents_premature_forgetting_at_scale`.
+  **Not yet validated on a real LoCoMo run** -- next step is exactly that.
+
 - **Root cause of the entire extraction-prompt saga (three rounds, see the
   two entries below): 0.6B model capacity, not prompt wording. Switched the
   default model to Qwen3-4B and simplified the prompt back down.** After

@@ -25,8 +25,9 @@ from pathlib import Path
 
 from memory.extractor import extract_turn, extract_memories, tag_emotion_text
 from memory.store import HippoMemory
-from memory.retriever import hippo_retrieve
+from memory.retriever import hippo_retrieve, DEFAULT_RELEVANCE_WEIGHT
 from memory.decay import apply_forgetting_cycle
+from memory.scorer import DEFAULT_DECAY_LAMBDA
 from llm.context import build_system_prompt, BASE_COMPANION_PROMPT
 
 DECAY_EVERY = 10  # apply forgetting cycle every N turns
@@ -49,7 +50,22 @@ class HippoVoicePipeline:
         llm_client=None,
         text_only: bool = False,
         memory_path: str | None = None,
+        decay_lambda: float | None = None,
+        relevance_weight: float | None = None,
     ):
+        # None means "use the module-tuned default" -- existing callers
+        # (signal/noise benchmark, tests, Voice Test) get identical behavior
+        # to before. Confirmed on a real LoCoMo run that the default decay
+        # rate (tuned for ~90-100 turn conversations) makes episodic memory
+        # physically forget almost everything well before a 369-663 turn
+        # conversation ends, regardless of extraction/retrieval quality --
+        # callers ingesting much longer conversations should pass a smaller
+        # decay_lambda (and typically a higher relevance_weight, since a
+        # slower-decaying episodic store needs relevance to do more of the
+        # ranking work than availability) explicitly.
+        self.decay_lambda = decay_lambda if decay_lambda is not None else DEFAULT_DECAY_LAMBDA
+        self.relevance_weight = relevance_weight if relevance_weight is not None else DEFAULT_RELEVANCE_WEIGHT
+
         self.text_only = text_only
         self.current_turn = 0
         self.semantic_memory = HippoMemory(
@@ -156,7 +172,8 @@ class HippoVoicePipeline:
             r["_score"] = round(relevance, 6)
 
         episodic_pool = hippo_retrieve(
-            query, self.episodic_memory, self.episodic_memory.graph, self.current_turn, top_k * 2
+            query, self.episodic_memory, self.episodic_memory.graph, self.current_turn, top_k * 2,
+            relevance_weight=self.relevance_weight, decay_lambda=self.decay_lambda,
         )
 
         combined = sorted(semantic_pool + episodic_pool, key=lambda r: r.get("_score", 0.0), reverse=True)
@@ -215,7 +232,9 @@ class HippoVoicePipeline:
         """
         if self.current_turn > 0 and self.current_turn % DECAY_EVERY == 0:
             all_memories = self.episodic_memory.get_all()
-            active, forgotten = apply_forgetting_cycle(all_memories, self.current_turn, self.llm)
+            active, forgotten = apply_forgetting_cycle(
+                all_memories, self.current_turn, self.llm, decay_lambda=self.decay_lambda
+            )
 
             all_ids = {m["id"] for m in all_memories}
             active_ids = {m["id"] for m in active if "id" in m}

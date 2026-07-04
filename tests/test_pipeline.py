@@ -110,6 +110,34 @@ def test_forgotten_memories_are_actually_deleted_from_store():
     )
 
 
+def test_decay_lambda_override_prevents_premature_forgetting_at_scale():
+    # Confirms decay_lambda passed to the pipeline constructor actually
+    # threads through _maybe_decay() -> apply_forgetting_cycle() end-to-end,
+    # not just at the standalone function level (see tests/test_decay.py).
+    # Confirmed on a real LoCoMo run that the pipeline's default decay_lambda
+    # (tuned for ~90-100 turn conversations) forgets almost everything well
+    # before a 369-663 turn conversation ends.
+    texts = [f"the weather was mild on day {i}" for i in range(400)]
+
+    default_pipe = HippoVoicePipeline(llm_client=_make_llm(memory_type="event"), text_only=True)
+    for t in texts:
+        default_pipe.ingest_text_turn(t)
+
+    scaled_pipe = HippoVoicePipeline(
+        llm_client=_make_llm(memory_type="event"), text_only=True, decay_lambda=0.001
+    )
+    for t in texts:
+        scaled_pipe.ingest_text_turn(t)
+
+    assert scaled_pipe.episodic_memory.count() > default_pipe.episodic_memory.count(), (
+        "a much smaller decay_lambda should keep meaningfully more memories "
+        "alive at LoCoMo scale than the pipeline's short-conversation default"
+    )
+    assert scaled_pipe.episodic_memory.count() == len(texts), (
+        "with a sufficiently small decay_lambda, nothing should be forgotten at all"
+    )
+
+
 def test_compress_cycle_persists_compressed_entry_and_removes_originals():
     pipe = HippoVoicePipeline(llm_client=_make_llm(), text_only=True)
     # Seed memories directly in the compress band at turn 60 (neutral/0.3 ->
