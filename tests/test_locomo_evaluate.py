@@ -9,6 +9,7 @@ from benchmarks.locomo.evaluate import (
     rescore_details,
     _current_commit_hash,
     debug_extraction_for_turns,
+    print_qa_trace,
     MULTI_HOP_CATEGORY,
     ADVERSARIAL_CATEGORY,
 )
@@ -262,3 +263,37 @@ def test_debug_extraction_for_turns_skips_missing_dia_ids():
 def test_debug_extraction_for_turns_empty_when_no_ids_found():
     conv = {"conversation": {"session_1": [{"speaker": "A", "dia_id": "D1:1", "text": "hello"}]}}
     assert debug_extraction_for_turns(conv, ["D9:99"], _make_extraction_llm()) == []
+
+
+# ── print_qa_trace ────────────────────────────────────────────────────────────
+
+def test_print_qa_trace_finds_matching_question_and_prints_context(capsys):
+    details = [
+        {
+            "question": "Which city have both Jean and John visited?",
+            "gold": "rome", "predicted": "downtown", "f1": 0.0, "category": 1,
+            "context": "- John went to Rome in 2019\n- Jean loves Italian food",
+        },
+        {"question": "Unrelated question", "gold": "x", "predicted": "y", "f1": 0.0, "category": 2, "context": ""},
+    ]
+    print_qa_trace(details, "Jean and John")
+    out = capsys.readouterr().out
+    assert "Which city have both Jean and John visited?" in out
+    assert "John went to Rome in 2019" in out
+    assert "Unrelated question" not in out
+
+
+def test_print_qa_trace_no_match_prints_message(capsys):
+    details = [{"question": "some question", "gold": "x", "predicted": "y", "f1": 0.0, "category": 2, "context": ""}]
+    print_qa_trace(details, "nonexistent")
+    out = capsys.readouterr().out
+    assert "No question matching" in out
+
+
+def test_print_qa_trace_handles_missing_context_field_gracefully(capsys):
+    # Older checkpoints (written before context logging was added) won't
+    # have this key -- must say so explicitly, not crash or print nothing.
+    details = [{"question": "old question", "gold": "x", "predicted": "y", "f1": 0.0, "category": 2}]
+    print_qa_trace(details, "old question")
+    out = capsys.readouterr().out
+    assert "context not logged" in out
