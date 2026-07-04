@@ -3,6 +3,7 @@ from benchmarks.locomo.evaluate import (
     build_qa_context,
     _flatten_conversation,
     rescore_details,
+    _current_commit_hash,
 )
 
 
@@ -99,3 +100,14 @@ def test_rescore_details_flips_previously_wrong_answer():
     result = rescore_details(details)
     assert result["details"][0]["correct"] is True
     assert result["correct"] == 1
+
+
+# ── checkpoint fingerprint / commit hash ────────────────────────────────────────
+
+def test_current_commit_hash_returns_nonempty_string_in_this_repo():
+    # This test file lives inside the hippovoice git repo, so a real commit
+    # hash should always be resolvable here (falls back to "unknown" only
+    # outside a git checkout).
+    commit = _current_commit_hash()
+    assert isinstance(commit, str)
+    assert commit != ""

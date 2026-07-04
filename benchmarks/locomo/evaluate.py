@@ -61,6 +61,27 @@ def load_locomo(data_path: str | None = None) -> list[dict]:
         return json.load(f)
 
 
+def _current_commit_hash() -> str:
+    """
+    Short git commit hash of the working tree, or "unknown" outside a repo.
+
+    Included in the checkpoint fingerprint because model_name/backend/run
+    params staying the same across a `git pull` is the common case --
+    without this, resuming from an existing checkpoint after pulling a real
+    code change (e.g. a retrieval fix) would silently skip re-running
+    entirely and just replay stale pre-fix results, since nothing else in
+    the fingerprint would have changed.
+    """
+    try:
+        import subprocess
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
 def _flatten_conversation(conv: dict) -> list[str]:
     """
     Flatten all session turns, in session order, into 'Speaker: text' strings.
@@ -122,11 +143,13 @@ def run_locomo(
     couple hours -- long enough that a Colab free-tier disconnect losing all
     progress is a real, painful risk without this.
 
-    The checkpoint records a fingerprint (LLM model name/backend + run
-    parameters) and refuses to resume from one written under a different
-    setup -- e.g. a dry-run mock LLM, or a different num_conversations --
+    The checkpoint records a fingerprint (LLM model name/backend, run
+    parameters, and current git commit) and refuses to resume from one
+    written under a different setup -- e.g. a dry-run mock LLM, a different
+    num_conversations, or code pulled after the checkpoint was written --
     since silently trusting a stale file there would replay whatever
-    (possibly garbage) results it already has instead of actually running.
+    (possibly garbage or pre-fix) results it already has instead of
+    actually running.
     `checkpoint_path` itself does NOT persist across a Colab "Restart
     session": that only resets the Python process, not /content/'s disk, so
     a leftover checkpoint from an earlier dry-run attempt survives restarts.
@@ -155,6 +178,7 @@ def run_locomo(
         "num_conversations": num_conversations,
         "max_qa_per_conversation": max_qa_per_conversation,
         "include_adversarial": include_adversarial,
+        "commit": _current_commit_hash(),
     }
 
     correct = 0
