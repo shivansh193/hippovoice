@@ -4,6 +4,7 @@ from benchmarks.locomo.evaluate import (
     _flatten_conversation,
     rescore_details,
     _current_commit_hash,
+    debug_extraction_for_turns,
 )
 
 
@@ -111,3 +112,62 @@ def test_current_commit_hash_returns_nonempty_string_in_this_repo():
     commit = _current_commit_hash()
     assert isinstance(commit, str)
     assert commit != ""
+
+
+# ── debug_extraction_for_turns ──────────────────────────────────────────────────
+
+def _make_extraction_llm():
+    import json
+    from unittest.mock import MagicMock
+
+    mock = MagicMock()
+
+    def per_turn(system, messages, max_tokens=512):
+        user_content = messages[-1]["content"] if messages else ""
+        turn_text = user_content.split("Turn: ", 1)[-1].strip()
+        return json.dumps([{"content": turn_text, "entity": "unknown", "type": "event"}])
+
+    mock.generate.side_effect = per_turn
+    mock.generate_batch.side_effect = lambda system, messages_list, max_tokens=512: [
+        per_turn(system, m, max_tokens) for m in messages_list
+    ]
+    return mock
+
+
+def test_debug_extraction_for_turns_finds_turn_by_dia_id_anywhere_in_conversation():
+    # D2:14 is in session 2, not session 1 -- this must work by id lookup,
+    # not by assuming the target is near the start of the flattened list.
+    conv = {
+        "conversation": {
+            "session_1_date_time": "8 May, 2023",
+            "session_1": [
+                {"speaker": "Caroline", "dia_id": "D1:1", "text": "hello"},
+            ],
+            "session_2_date_time": "25 May, 2023",
+            "session_2": [
+                {"speaker": "Caroline", "dia_id": "D2:14", "text": "it'll be tough as a single parent"},
+            ],
+        }
+    }
+    results = debug_extraction_for_turns(conv, ["D2:14"], _make_extraction_llm())
+    assert len(results) == 1
+    assert results[0]["dia_id"] == "D2:14"
+    assert "[25 May, 2023]" in results[0]["turn"]
+    assert "single parent" in results[0]["turn"]
+    assert results[0]["extracted"][0]["content"] == results[0]["turn"]
+
+
+def test_debug_extraction_for_turns_skips_missing_dia_ids():
+    conv = {
+        "conversation": {
+            "session_1": [{"speaker": "A", "dia_id": "D1:1", "text": "hello"}],
+        }
+    }
+    results = debug_extraction_for_turns(conv, ["D1:1", "D9:99"], _make_extraction_llm())
+    assert len(results) == 1
+    assert results[0]["dia_id"] == "D1:1"
+
+
+def test_debug_extraction_for_turns_empty_when_no_ids_found():
+    conv = {"conversation": {"session_1": [{"speaker": "A", "dia_id": "D1:1", "text": "hello"}]}}
+    assert debug_extraction_for_turns(conv, ["D9:99"], _make_extraction_llm()) == []

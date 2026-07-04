@@ -6,6 +6,13 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Confirmed on Kaggle: both retrieval regression fixes actually worked.**
+  Full signal/noise rerun (commit `c486468`): HippoVoice 20.0% noise
+  (signal=8, noise=2) vs NaiveRAG 30%, Mem0-style 30%, AMem-style 10% --
+  beats all three baselines (the actual core research claim), a genuine
+  validated recovery from the 40%/50% regressions. Misses the strict
+  absolute `<20%` threshold by landing exactly at 20%, but the comparative
+  wins are real.
 - **Confirmed on Kaggle: the top_k-merge fix worked (10 total results, not
   20), but noise rate got WORSE (50%) -- traced to a second, distinct bug
   in how semantic candidates are scored.** Pinning semantic candidates'
@@ -273,6 +280,15 @@ Add to this list; don't fix silently in passing.
 
 ## Open — found on first real (non-mocked, T4) Colab run
 
+- **Voice Test mic-recording cell fails on Kaggle specifically**:
+  `Javascript Error: await is only valid in async functions and the top
+  level bodies of modules`. The `RECORD_JS` snippet in colab.ipynb's Voice
+  Test section uses top-level `await`, which Colab's JS execution context
+  apparently tolerates but Kaggle's doesn't. Unrelated to any memory/
+  retrieval work this session; deferred since Voice Test isn't part of the
+  current LoCoMo/signal-noise investigation. Would need wrapping the
+  snippet in an async IIFE (`(async () => { ... })()`) to fix properly for
+  Kaggle.
 - **Not using multi-GPU parallelism when multiple GPUs are available (e.g.
   Kaggle's T4 x2).** `LLMClient`/`generate_batch` only ever runs on a single
   device -- `device_map="auto"` may spread model layers across both GPUs if
