@@ -199,9 +199,21 @@ def run_signal_noise_benchmark(pipeline, system_name: str, noise_per_signal: int
     # Retrieve and classify
     retrieved = pipeline.retrieve(RETRIEVAL_QUERY, top_k=10)
 
+    if not retrieved:
+        # A 0.0 noise_rate here would be indistinguishable from a genuinely
+        # clean retrieval -- confirmed this actually happened (extraction
+        # returning nothing for every turn silently printed as noise_rate=0.0
+        # / "PASS" for a total failure). Fail loudly instead of reporting a
+        # vacuous win.
+        raise RuntimeError(
+            f"{system_name}: retrieve() returned zero results for "
+            f"{len(turns)} ingested turns -- extraction likely produced no "
+            f"memories at all; treat this as a failure, not a clean pass."
+        )
+
     signal_count = sum(1 for r in retrieved if _is_signal(r.get("content", "")))
     noise_count = len(retrieved) - signal_count
-    noise_rate = noise_count / len(retrieved) if retrieved else 0.0
+    noise_rate = noise_count / len(retrieved)
 
     return {
         "system": system_name,

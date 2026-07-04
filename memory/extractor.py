@@ -6,14 +6,15 @@ VALID_LABELS = {"neutral", "joy", "sadness", "fear", "anger", "surprise", "disgu
 
 EXTRACTION_PROMPT = """\
 Extract distinct, self-contained memory fragments from this conversation turn.
-Each fragment must be a single fact, preference, or event worth remembering
-long-term about a specific person -- including something only implied rather
-than stated outright.
+Extract a fragment whenever the turn reveals any new fact, event, opinion,
+feeling, or plan about a person -- no matter how it's phrased, how much
+emotion is attached, or whether it's stated directly or only implied.
 
-The only turns to skip are pure greetings, thanks, compliments, or reactions
-that add no new information (return an empty array for those). Everything
-else that reveals something about a person should be extracted, even if it's
-indirect or requires reading between the lines.
+Only return an empty array if, after removing names and pleasantries, there
+is truly nothing left: a bare greeting ("Hi!"), a bare acknowledgment
+("Thanks!", "Agreed.", "Congrats!"), or a question with no statement
+attached. A turn describing something upsetting or emotional that happened to
+someone is NOT a bare reaction -- it is an event, and must be extracted.
 
 Return ONLY a JSON array — no prose, no markdown fences.
 
@@ -24,6 +25,9 @@ Example output: []
 
 Example input: Caroline: I love hiking on weekends with my dog.
 Example output: [{{"content": "Caroline enjoys hiking on weekends with her dog", "entity": "Caroline", "type": "preference"}}]
+
+Example input: Jon: I just found out I have to move out of my apartment in two weeks because the building got sold, and I'm honestly panicking a bit.
+Example output: [{{"content": "Jon has to move out of his apartment within two weeks because the building was sold", "entity": "Jon", "type": "event"}}]
 
 Example input: Jon: I've started going to the gym again, it helps clear my head after a rough day at work.
 Example output: [{{"content": "Jon goes to the gym to cope with stress from work", "entity": "Jon", "type": "preference"}}]
