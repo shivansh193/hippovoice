@@ -6,6 +6,48 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Confirmed on a real (genuinely fresh, restart-verified) run with the
+  decay/relevance fix (`cf0d3d1`) in place: it works as designed -- "Jean
+  and John" retrieval now surfaces a Rome mention that wasn't there before
+  -- but LoCoMo avg F1 still barely moved (5.4%, bins {near_zero: 41,
+  partial: 4, high: 0}). Root cause of the remaining floor: extraction was
+  silently stripping the date/time prefix off every turn, regardless of
+  decay or retrieval quality.** `_flatten_conversation` prefixes each turn
+  with `[time on date]` specifically so date questions are answerable, and
+  `debug_extraction_for_turns` confirmed the model's input genuinely
+  includes it (`[1:56 pm on 8 May, 2023] Caroline: ...`) -- but the
+  extracted content was consistently just `'Caroline was happy and
+  thankful for all the support'`, no date at all. Since most of every run's
+  near-zero bin is date questions, this explains why retrieval improvements
+  alone couldn't move the aggregate score: even when the right episodic
+  memory survived and got retrieved, the specific date needed to answer the
+  question had already been discarded during extraction.
+
+  Fixed by adding an explicit date-preservation instruction and two dated
+  few-shot examples to `EXTRACTION_PROMPT`. Took three iterations to get
+  right, each validated with a cheap 5-case probe against the real model
+  before touching any code:
+  - v1 (instruction + one dated-event example: "went on a trip to Rome"):
+    fixed the objective-event case (`"Jon lost his job... on 19 January,
+    2023"`) but left feeling/opinion turns undated -- the model generalized
+    the date-preservation rule too narrowly to the one shape it saw.
+  - v2 (added a second, feeling/opinion dated example): fixed both dated
+    cases, but broke a previously-working plain non-dated signal turn
+    (returned `[]` instead of extracting normally) -- with every example
+    now showing a date prefix, the model over-generalized to "only extract
+    from turns that have one."
+  - v3 (added back an explicit non-dated example, three examples total):
+    all 5 test cases correct simultaneously -- both dated shapes preserve
+    their date, junk still returns `[]`, plain non-dated turns extract
+    normally with no phantom date. All three example shapes are load-
+    bearing; this was confirmed by testing each omission separately rather
+    than assumed.
+
+  **Not yet validated on a real LoCoMo run** -- next step is exactly that,
+  specifically re-checking whether the date-question near-zero failures
+  (the majority of the bin) actually resolve now that both decay/relevance
+  (`cf0d3d1`) and date preservation are in place together.
+
 - **Confirmed on a real run with Qwen3-4B (extraction now fully working,
   see entry below): the LoCoMo score didn't move at all (5.0% avg F1,
   bins near-identical to every prior run this session, including the ones
