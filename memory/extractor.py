@@ -15,9 +15,26 @@ VALID_LABELS = {"neutral", "joy", "sadness", "fear", "anger", "surprise", "disgu
 # capacity, not prompt engineering. This prompt is validated against
 # Qwen3-4B specifically; a smaller model may need the extra scaffolding
 # again (see BUGS.md for the full trace of what didn't work and why).
+#
+# Date-preservation instruction + two dated examples added after confirming
+# on a real run that the model was seeing each turn's "[time on date]" prefix
+# (added by _flatten_conversation for exactly this reason) but never
+# carrying the date into extracted content -- explaining most of LoCoMo's
+# near-zero date-question failures independent of decay/retrieval quality.
+# Needed BOTH a concrete-event example ("went on a trip") AND a
+# feeling/opinion example ("felt relieved and grateful") -- one alone made
+# the model only apply the date to the shape it saw. Also needed an explicit
+# non-dated example, or the model over-generalized to "only extract from
+# turns that have a date prefix" and dropped everything else. All three
+# example shapes are load-bearing; confirmed by testing each omission
+# separately before landing here.
 EXTRACTION_PROMPT = """\
 Extract any noteworthy facts, preferences, plans, or events mentioned in this turn.
 If it's just a greeting, thanks, or acknowledgment with nothing else in it, return an empty array.
+If the turn starts with a date/time (e.g. "[1:56 pm on 8 May, 2023]"), include that date in
+the content for every fact extracted from it -- this applies to feelings and opinions just
+as much as concrete events. Most turns won't have a date prefix at all -- extract from those
+exactly as normal, with no date to add.
 
 Return ONLY a JSON array — no prose, no markdown fences.
 Schema: [{{"content": "...", "entity": "...", "type": "fact|preference|event|person"}}]
@@ -27,6 +44,12 @@ Example output: []
 
 Example input: My best friend told me she's moving across the country permanently.
 Example output: [{{"content": "Best friend is moving across the country permanently", "entity": "user", "type": "event"}}]
+
+Example input: [10 am on 3 March, 2023] I just got back from a trip to Rome.
+Example output: [{{"content": "User went on a trip to Rome on 3 March, 2023", "entity": "user", "type": "event"}}]
+
+Example input: [2 pm on 12 June, 2023] I'm so relieved and grateful for my friends' support this week.
+Example output: [{{"content": "User felt relieved and grateful for friends' support on 12 June, 2023", "entity": "user", "type": "preference"}}]
 
 Turn: {turn}"""
 
