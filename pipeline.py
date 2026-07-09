@@ -24,8 +24,11 @@ Splitting by type removes that tension.
 from pathlib import Path
 
 from memory.extractor import extract_turn, extract_memories, tag_emotion_text
-from memory.store import HippoMemory
-from memory.retriever import hippo_retrieve, DEFAULT_RELEVANCE_WEIGHT
+from memory.store import HippoMemory, _cosine_similarity
+from memory.retriever import (
+    hippo_retrieve, DEFAULT_RELEVANCE_WEIGHT, NAME_MATCH_BONUS,
+    _extract_proper_nouns, _content_matches_names, _name_match_ids,
+)
 from memory.decay import apply_forgetting_cycle
 from memory.scorer import DEFAULT_DECAY_LAMBDA
 from llm.context import build_system_prompt, BASE_COMPANION_PROMPT
@@ -163,13 +166,38 @@ class HippoVoicePipeline:
         rate in a local repro. Scoring by relevance alone removes that
         unconditional floor -- a semantic candidate still has to actually
         match the query to compete.
+
+        Also folds in an exact proper-noun match bonus (see
+        memory/retriever.py::NAME_MATCH_BONUS) -- confirmed on a real LoCoMo
+        run that pure embedding similarity can't reliably distinguish
+        similarly-spelled names (e.g. "Jon" vs "John"), so a literal
+        whole-word match on the query's proper nouns is folded in as an
+        additional, embedding-independent signal. A full-store scan
+        guarantees a name match is considered even if it didn't make the
+        top top_k*2 by raw embedding similarity.
         """
+        query_names = _extract_proper_nouns(query)
+
         semantic_pool = self.semantic_memory.search(query, top_k=top_k * 2)
+        found_ids = {r["id"] for r in semantic_pool if "id" in r}
+        extra_ids = [mid for mid in _name_match_ids(query_names, self.semantic_memory) if mid not in found_ids]
+        if extra_ids:
+            extra = [(mid, self.semantic_memory.get_by_id(mid)) for mid in extra_ids]
+            extra = [(mid, m) for mid, m in extra if m is not None]
+            if extra:
+                texts = [query] + [m.get("content", "") for _, m in extra]
+                embeddings = self.semantic_memory.embedder.encode(texts)
+                query_emb, mem_embs = embeddings[0], embeddings[1:]
+                for (mid, m), mem_emb in zip(extra, mem_embs):
+                    distance = 1.0 - _cosine_similarity(query_emb, mem_emb)
+                    semantic_pool.append({**m, "id": mid, "_distance": distance})
+
         for r in semantic_pool:
             relevance = 1.0 - r.get("_distance", 0.0)
+            name_bonus = NAME_MATCH_BONUS if _content_matches_names(r.get("content", ""), query_names) else 0.0
             r["_relevance"] = round(relevance, 6)
             r["current_salience"] = 1.0
-            r["_score"] = round(relevance, 6)
+            r["_score"] = round(relevance + name_bonus, 6)
 
         episodic_pool = hippo_retrieve(
             query, self.episodic_memory, self.episodic_memory.graph, self.current_turn, top_k * 2,

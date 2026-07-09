@@ -144,6 +144,72 @@ def test_retrieve_empty_store():
     assert results == []
 
 
+def test_exact_name_match_disambiguates_similarly_embedded_names():
+    # Confirmed on a real LoCoMo run: "Jon" and "John" (different people) are
+    # close enough in embedding space that pure cosine similarity can't
+    # reliably tell them apart -- retrieval for a "John" question
+    # consistently surfaced "Jon" content instead. An exact whole-word name
+    # match should let the correctly-named memory win even against a
+    # topically-similar, wrong-name distractor.
+    mem = HippoMemory(collection_name="test_name_match")
+    graph = mem.graph
+
+    mem.add({
+        "content": "Jon took a trip to Rome last week to clear his mind",
+        "emotion": {"label": "neutral", "intensity": 0.1},
+        "base_weight": 1.0, "recall_count": 0, "turn_created": 0,
+    }, "wrong_name")
+
+    mem.add({
+        "content": "John visited Rome for a work conference",
+        "emotion": {"label": "neutral", "intensity": 0.1},
+        "base_weight": 1.0, "recall_count": 0, "turn_created": 0,
+    }, "right_name")
+
+    results = hippo_retrieve("Which city did John visit?", mem, graph, current_turn=5, top_k=1)
+    assert len(results) == 1
+    assert results[0]["id"] == "right_name", (
+        "exact name match on 'John' should win over a similarly-embedded "
+        "'Jon' memory about the same general topic"
+    )
+
+
+def test_name_match_guarantees_candidate_even_if_crowded_out_of_seed_pool():
+    # The correct memory must be considered even if many topically-similar
+    # distractor memories (sharing a similarly-embedded but wrong name)
+    # dominate the raw embedding-similarity seed pool -- otherwise it never
+    # even reaches reranking for the name-match bonus to promote.
+    mem = HippoMemory(collection_name="test_name_match_pool")
+    graph = mem.graph
+
+    for i in range(20):
+        mem.add({
+            "content": f"Jon went to a city on trip number {i}",
+            "emotion": {"label": "neutral", "intensity": 0.1},
+            "base_weight": 1.0, "recall_count": 0, "turn_created": 0,
+        }, f"jon_{i}")
+
+    mem.add({
+        "content": "John visited Rome for a work conference",
+        "emotion": {"label": "neutral", "intensity": 0.1},
+        "base_weight": 1.0, "recall_count": 0, "turn_created": 0,
+    }, "right_name")
+
+    results = hippo_retrieve("Which city did John visit?", mem, graph, current_turn=5, top_k=3)
+    assert any(r["id"] == "right_name" for r in results), (
+        "an exact name match should be considered even if crowded out of "
+        "the raw embedding-similarity seed pool by many similarly-worded "
+        "distractor memories"
+    )
+
+
+def test_extract_proper_nouns_excludes_question_words():
+    from memory.retriever import _extract_proper_nouns
+    names = _extract_proper_nouns("Which city have both Jean and John visited?")
+    assert names == {"Jean", "John"}
+    assert "Which" not in names
+
+
 def test_decay_lambda_override_keeps_old_memories_available():
     # Confirms hippo_retrieve actually uses a custom decay_lambda rather than
     # always falling back to the module default. Confirmed on a real LoCoMo

@@ -256,3 +256,19 @@ def test_irrelevant_semantic_facts_do_not_outrank_relevant_episodic_memories():
         "semantic-store facts, not lose purely because of unconditional "
         "availability=1.0 scoring"
     )
+
+
+def test_semantic_pool_name_match_disambiguates_similarly_embedded_names():
+    # Same fix as memory/retriever.py's episodic-side name-match bonus,
+    # applied to the semantic pool -- confirmed the "Jon"/"John" confusion
+    # can affect durable facts too, not just episodic events.
+    pipe = HippoVoicePipeline(llm_client=_make_llm(memory_type="fact"), text_only=True)
+    pipe.ingest_text_turn("Jon took a trip to Rome last week to clear his mind")
+    pipe.ingest_text_turn("John visited Rome for a work conference")
+
+    results = pipe.retrieve("Which city did John visit?", top_k=1)
+    assert len(results) == 1
+    assert "John" in results[0]["content"], (
+        "exact name match on 'John' should win over a similarly-embedded "
+        "'Jon' fact about the same general topic in the semantic store too"
+    )
