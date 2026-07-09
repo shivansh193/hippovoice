@@ -349,6 +349,8 @@ def run_locomo(
             predicted = conv_pipeline.llm.generate(
                 system=(
                     "Answer the question using only the provided context. "
+                    "Give a specific, direct answer (a name, label, date, or "
+                    "short phrase) rather than a general description. "
                     "Be concise — one sentence or less."
                 ),
                 messages=[

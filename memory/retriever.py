@@ -1,8 +1,54 @@
 import math
+import re
 
 from memory.scorer import compute_salience, DEFAULT_DECAY_LAMBDA
 from memory.store import HippoMemory, AssociationGraph, _cosine_similarity
 from memory.decay import FORGET_THRESHOLD
+
+_PROPER_NOUN_RE = re.compile(r"\b[A-Z][a-zA-Z]+\b")
+
+# Sentence-initial capitalization means naive proper-noun extraction picks up
+# common question/determiner words too (nearly every LoCoMo question starts
+# with one of these) -- excluded so they don't produce spurious "matches"
+# against unrelated memory content that happens to share a capitalized
+# sentence-starter.
+_NOT_PROPER_NOUNS = {
+    "Which", "What", "When", "Where", "Who", "Why", "How",
+    "Would", "Could", "Should", "Did", "Does", "Is", "Are", "Has", "Have",
+    "The", "A", "An", "This", "That", "These", "Those",
+}
+
+# Confirmed on a real LoCoMo run: "Jon" and "John" (different people, same
+# conversation) are close enough in embedding space that pure cosine
+# similarity can't reliably tell them apart -- retrieval for a "John"
+# question consistently surfaced "Jon" content instead. Embeddings have no
+# real entity-disambiguation mechanism; a literal, case-sensitive, whole-word
+# match on the query's proper nouns is a cheap, deterministic signal
+# embedding similarity can't provide, since "Jon" and "John" are different
+# strings even though their embeddings are nearly identical.
+NAME_MATCH_BONUS = 0.3
+
+
+def _extract_proper_nouns(text: str) -> set[str]:
+    return set(_PROPER_NOUN_RE.findall(text)) - _NOT_PROPER_NOUNS
+
+
+def _content_matches_names(content: str, names: set[str]) -> bool:
+    return any(re.search(rf"\b{re.escape(name)}\b", content) for name in names)
+
+
+def _name_match_ids(names: set[str], memory: HippoMemory) -> list[str]:
+    """
+    Full-store scan for exact name matches, not just embedding-based seeds.
+    Cheap (plain string search, no embedding calls) and necessary: if a
+    wrong-but-similarly-embedded name (e.g. "Jon") dominates the top of
+    embedding-based seed retrieval, the correct ("John") memory may never
+    even enter the candidate pool for reranking to promote -- this
+    guarantees any exact name match is at least considered.
+    """
+    if not names:
+        return []
+    return [m["id"] for m in memory.get_all() if _content_matches_names(m.get("content", ""), names)]
 
 # Log-space bounds for normalizing availability into [0, 1]. FORGET_THRESHOLD
 # is the existing boundary below which a memory is already being deleted by
@@ -142,10 +188,19 @@ def hippo_retrieve(
     ~0 for virtually everything long before top_k*4 candidates are even
     considered, and relevance ends up reranking a pool that's already been
     hollowed out by decay rather than genuinely competing against it.
+
+    Also folds in NAME_MATCH_BONUS for any candidate whose content contains
+    an exact, whole-word match for a proper noun in the query -- see the
+    module-level comment above NAME_MATCH_BONUS for why embedding similarity
+    alone can't disambiguate similarly-spelled names. A full-store scan
+    (_name_match_ids) guarantees such a candidate is considered even if it
+    didn't make the embedding-based seed pool.
     """
+    query_names = _extract_proper_nouns(query)
     seed_ids = retrieve_seeds(query, memory, top_k=max(top_k * 4, 15))
+    name_ids = _name_match_ids(query_names, memory)
     expanded_ids = expand_via_graph(seed_ids[:graph_expand_seeds], graph)
-    candidate_ids = list(dict.fromkeys(seed_ids + expanded_ids))
+    candidate_ids = list(dict.fromkeys(seed_ids + name_ids + expanded_ids))
 
     found = [(mid, memory.get_by_id(mid)) for mid in candidate_ids]
     found = [(mid, m) for mid, m in found if m is not None]
@@ -171,7 +226,8 @@ def hippo_retrieve(
             decay_lambda=decay_lambda,
         )
         relevance = _cosine_similarity(query_emb, mem_emb)
-        score = relevance_weight * relevance + (1 - relevance_weight) * _availability_score(availability)
+        name_bonus = NAME_MATCH_BONUS if _content_matches_names(m.get("content", ""), query_names) else 0.0
+        score = relevance_weight * relevance + (1 - relevance_weight) * _availability_score(availability) + name_bonus
         candidates.append({
             **m,
             "id": mid,

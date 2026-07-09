@@ -6,6 +6,57 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Confirmed on a real, genuinely-fresh run with both the decay/relevance
+  fix (`cf0d3d1`) and date-preservation fix (`73491b2`) together: LoCoMo
+  avg F1 jumped from 5.4% to 15.1% (bins {near_zero: 41→31, partial:
+  4→14}), and signal/noise improved to 10% noise (from 20%), now beating
+  every baseline cleanly.** This is the first real movement on the ~5%
+  floor all session. Verified genuinely fresh this time (`commit
+  [73491b2]` confirmed in Step 2 output before running).
+
+- **Jon/John name-confusion bug (open since early this session): fixed.**
+  Verified first that this is NOT cross-conversation leakage -- each
+  LoCoMo conversation gets a fresh `HippoVoicePipeline` with a uniquified
+  in-memory collection (`memory/store.py`'s `EphemeralClient` already
+  suffixes collection names with a uuid specifically to prevent this, per
+  an existing comment confirming it was tested) -- and `run_locomo`'s QA
+  loop confirmed the same `conv_pipeline`/`conv["qa"]` pairing throughout,
+  no object-reuse bug. So this really is what it was originally diagnosed
+  as: multiple similarly-spelled people (Jon/John/Jean) within the *same*
+  conversation, close enough in embedding space that pure cosine similarity
+  can't tell them apart.
+
+  Fixed by adding an exact, case-sensitive, whole-word proper-noun match as
+  a scoring signal independent of embeddings (`memory/retriever.py`:
+  `NAME_MATCH_BONUS = 0.3`, `_extract_proper_nouns`, `_content_matches_names`,
+  `_name_match_ids`). Two things were necessary, not just a scoring bonus:
+  (1) the bonus itself, applied during reranking, and (2) a full-store scan
+  (`_name_match_ids`) unioned into the candidate pool *before* reranking --
+  without it, a correctly-named memory crowded out of the raw
+  embedding-similarity seed pool by many similarly-worded wrong-name
+  memories would never even reach reranking for the bonus to promote.
+  Confirmed both are load-bearing with a local test that specifically
+  crowds the seed pool with 20 wrong-name distractors. Proper-noun
+  extraction excludes common question/determiner words (`Which`, `What`,
+  `The`, ...) since nearly every LoCoMo question starts with one and would
+  otherwise produce spurious "matches". Applied to both the episodic path
+  (`hippo_retrieve`) and the semantic pool (`HippoVoicePipeline.retrieve`),
+  since durable facts can suffer the same confusion. Validated with real
+  (CPU) sentence-transformer embeddings locally, no GPU needed -- three new
+  tests in `test_retriever.py` and one in `test_pipeline.py`.
+  **Not yet validated on a real LoCoMo run.**
+
+- **Identity/relationship-status wording mismatch (e.g. "an lgbtq+
+  individual who..." vs gold "transgender woman"): NOT a memory/retrieval
+  bug -- the model's answers are substantively correct, they just don't use
+  the exact canonical word LoCoMo's strict token-overlap scorer needs.**
+  Nudged the QA-answering system prompt (in `run_locomo`) toward specific,
+  direct-label answers instead of descriptive paraphrases. This is a lower-
+  confidence, exploratory change -- unlike everything else on this list, it
+  isn't validated against the real model (the extraction-prompt work showed
+  how unreliable guessing at LLM behavior can be without a real check), so
+  treat the result as informative rather than a proven fix either way.
+
 - **Confirmed on a real (genuinely fresh, restart-verified) run with the
   decay/relevance fix (`cf0d3d1`) in place: it works as designed -- "Jean
   and John" retrieval now surfaces a Rome mention that wasn't there before
