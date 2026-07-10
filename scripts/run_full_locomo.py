@@ -6,10 +6,28 @@ run. Progress checkpoints to disk after every conversation (see
 benchmarks/locomo/evaluate.py::run_locomo), so re-running this script after
 an interruption resumes instead of starting over.
 
+Supports running any of the four systems (HippoVoice + the three local
+baseline reimplementations) through the *real*, F1-scored LoCoMo QA
+benchmark under the identical LLM/data/scoring -- not just the separate
+synthetic signal/noise benchmark. This is what makes a comparison against
+Mem0/A-MEM/NaiveRAG fair: their own published numbers use a different LLM
+(usually GPT-4-class) and often a different, more lenient scoring
+methodology (LLM-as-judge, not LoCoMo's own strict token-F1), so comparing
+our number directly against theirs would conflate the memory architecture
+with the underlying model and the yardstick. Running all four through this
+exact same harness isolates the one variable that actually matters here.
+
 Usage:
-    nohup python scripts/run_full_locomo.py > run_full_locomo.log 2>&1 &
-    tail -f run_full_locomo.log
+    nohup python scripts/run_full_locomo.py --system hippovoice > run_hippovoice.log 2>&1 &
+    nohup python scripts/run_full_locomo.py --system mem0       > run_mem0.log 2>&1 &
+    nohup python scripts/run_full_locomo.py --system amem       > run_amem.log 2>&1 &
+    nohup python scripts/run_full_locomo.py --system naive      > run_naive.log 2>&1 &
+    tail -f run_hippovoice.log
+
+Run these one at a time (they share the same GPU) -- queue them with `&&`
+in one shell, or just run each to completion before starting the next.
 """
+import argparse
 import json
 import sys
 
@@ -17,15 +35,55 @@ from llm.client import LLMClient
 from memory.extractor import extract_memories
 from benchmarks.locomo.evaluate import run_locomo
 
-CHECKPOINT_PATH = "locomo_checkpoint_full.json"
-RESULTS_PATH = "locomo_full_results.json"
-
 # Same decay/relevance values validated on Kaggle this session -- tuned for
 # LoCoMo's conversation length (hundreds of turns), not the pipeline's
 # ~90-100-turn default (see BUGS.md for why the default forgets almost
-# everything before a real LoCoMo conversation ends).
+# everything before a real LoCoMo conversation ends). Only used by the
+# HippoVoice factory -- baselines don't accept these parameters.
 DECAY_LAMBDA = 0.001
 RELEVANCE_WEIGHT = 0.85
+
+
+def _hippovoice_factory(llm):
+    from pipeline import HippoVoicePipeline
+    return HippoVoicePipeline(
+        llm_client=llm, text_only=True,
+        decay_lambda=DECAY_LAMBDA, relevance_weight=RELEVANCE_WEIGHT,
+    )
+
+
+def _mem0_factory(llm):
+    from baselines.mem0_baseline import Mem0Baseline
+    return Mem0Baseline(llm_client=llm)
+
+
+def _amem_factory(llm):
+    from baselines.a_mem_baseline import AMemBaseline
+    return AMemBaseline(llm_client=llm)
+
+
+def _naive_factory(llm):
+    from baselines.naive_rag import NaiveRAG
+    p = NaiveRAG()
+    # NaiveRAG doesn't use an LLM for memory management (pure vector store,
+    # no extraction/consolidation), so it has no .llm attribute of its own --
+    # but run_locomo's QA-answering step always calls conv_pipeline.llm to
+    # generate the final answer, regardless of system. Attach the shared
+    # client so it's wire-compatible for that step without changing the
+    # baseline class itself.
+    p.llm = llm
+    return p
+
+
+# None (the second element) means "use run_locomo's own default factory",
+# i.e. real HippoVoicePipeline construction with the values above -- kept
+# as None rather than duplicating that logic here.
+SYSTEMS = {
+    "hippovoice": ("HippoVoice", None),
+    "mem0": ("Mem0-style", _mem0_factory),
+    "amem": ("AMem-style", _amem_factory),
+    "naive": ("NaiveRAG", _naive_factory),
+}
 
 
 def sanity_check(llm) -> None:
@@ -34,6 +92,8 @@ def sanity_check(llm) -> None:
     run -- same probe used throughout this project's development to catch
     extraction regressions (junk pollution, under-extraction, dropped
     dates) early. Exits before the real run if anything looks wrong.
+    Only meaningful for systems that use memory/extractor.py -- HippoVoice
+    and the two LLM-backed baselines all do, so this always applies.
     """
     print("=== Extraction sanity check ===")
     ok = True
@@ -65,31 +125,51 @@ def sanity_check(llm) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--system", choices=sorted(SYSTEMS), default="hippovoice",
+        help="Which system to run through the real LoCoMo QA benchmark.",
+    )
+    args = parser.parse_args()
+    system_name, factory = SYSTEMS[args.system]
+
+    checkpoint_path = f"locomo_checkpoint_full_{args.system}.json"
+    results_path = f"locomo_full_results_{args.system}.json"
+
+    print(f"System under test: {system_name}")
     print("Loading Qwen/Qwen3-4B (4-bit)...")
     llm = LLMClient(model_name="Qwen/Qwen3-4B", load_in_4bit=True)
     print(f"Loaded: {llm.model_name}  backend: {llm._backend}\n")
 
     sanity_check(llm)
 
-    print("Running FULL LoCoMo benchmark (10 conversations, all QA pairs)...\n")
-    result = run_locomo(
+    print(f"Running FULL LoCoMo benchmark for {system_name} (10 conversations, all QA pairs)...\n")
+    kwargs = dict(
         llm_client=llm,
         num_conversations=10,
         max_qa_per_conversation=None,
-        checkpoint_path=CHECKPOINT_PATH,
-        decay_lambda=DECAY_LAMBDA,
-        relevance_weight=RELEVANCE_WEIGHT,
+        checkpoint_path=checkpoint_path,
         verbose=True,
     )
+    if factory is None:
+        # Default HippoVoice path -- let run_locomo apply DECAY_LAMBDA/
+        # RELEVANCE_WEIGHT itself rather than duplicating the values here.
+        kwargs["decay_lambda"] = DECAY_LAMBDA
+        kwargs["relevance_weight"] = RELEVANCE_WEIGHT
+    else:
+        kwargs["pipeline_factory"] = factory
+        kwargs["system_name"] = system_name
+
+    result = run_locomo(**kwargs)
 
     print("=" * 60)
-    print(f"LoCoMo avg F1: {result['avg_f1']:.1%}  (over {result['total']} questions)")
+    print(f"{system_name} LoCoMo avg F1: {result['avg_f1']:.1%}  (over {result['total']} questions)")
     print(f"bins: {result['bins']}")
     print("=" * 60)
 
-    with open(RESULTS_PATH, "w") as f:
+    with open(results_path, "w") as f:
         json.dump(result, f, indent=2)
-    print(f"Full results saved to {RESULTS_PATH}")
+    print(f"Full results saved to {results_path}")
 
 
 if __name__ == "__main__":

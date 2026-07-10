@@ -1,3 +1,5 @@
+import pytest
+
 from benchmarks.locomo.evaluate import (
     normalize_answer,
     f1_score,
@@ -10,6 +12,7 @@ from benchmarks.locomo.evaluate import (
     _current_commit_hash,
     debug_extraction_for_turns,
     print_qa_trace,
+    run_locomo,
     MULTI_HOP_CATEGORY,
     ADVERSARIAL_CATEGORY,
 )
@@ -204,6 +207,117 @@ def test_current_commit_hash_returns_nonempty_string_in_this_repo():
     commit = _current_commit_hash()
     assert isinstance(commit, str)
     assert commit != ""
+
+
+# ── pipeline_factory (fair comparison against baselines) ─────────────────────────
+# run_locomo() used to hardcode HippoVoicePipeline construction per conversation,
+# meaning baselines (Mem0Baseline/AMemBaseline/NaiveRAG) could never be run
+# through the real, F1-scored LoCoMo QA benchmark -- only the separate
+# synthetic signal/noise one. pipeline_factory generalizes this so any
+# baseline can be evaluated under the identical LLM/data/scoring.
+
+def test_custom_pipeline_factory_requires_system_name():
+    with pytest.raises(ValueError):
+        run_locomo(llm_client=object(), pipeline_factory=lambda llm: None)
+
+
+def test_system_name_requires_custom_pipeline_factory():
+    with pytest.raises(ValueError):
+        run_locomo(llm_client=object(), system_name="not really custom")
+
+
+def test_pipeline_factory_is_used_instead_of_hippovoice(monkeypatch):
+    import benchmarks.locomo.evaluate as evaluate_mod
+
+    fake_conv = {
+        "conversation": {
+            "session_1_date_time": "1 May, 2023",
+            "session_1": [{"dia_id": "D1:1", "speaker": "Alex", "text": "I got a new job."}],
+        },
+        "qa": [{"question": "What did Alex get?", "answer": "a new job", "category": 2}],
+    }
+    monkeypatch.setattr(evaluate_mod, "load_locomo", lambda data_path=None: [fake_conv])
+
+    constructed = []
+
+    class FakePipeline:
+        def __init__(self, llm):
+            self.llm = llm
+            constructed.append(self)
+
+        def ingest_text_turn(self, text):
+            pass
+
+        def retrieve(self, query, top_k=5):
+            return []
+
+    llm = _make_extraction_llm()
+    llm.generate.side_effect = None
+    llm.generate.return_value = "a new job"
+
+    result = evaluate_mod.run_locomo(
+        llm_client=llm,
+        num_conversations=1,
+        pipeline_factory=lambda llm_client: FakePipeline(llm_client),
+        system_name="FakeSystem",
+        verbose=False,
+    )
+
+    assert len(constructed) == 1 and isinstance(constructed[0], FakePipeline), (
+        "pipeline_factory should be used for the per-conversation pipeline "
+        "instead of hardcoding HippoVoicePipeline"
+    )
+    assert result["total"] == 1
+
+
+def test_fingerprint_records_system_name(monkeypatch, tmp_path):
+    import benchmarks.locomo.evaluate as evaluate_mod
+
+    fake_conv = {
+        "conversation": {
+            "session_1_date_time": "1 May, 2023",
+            "session_1": [{"dia_id": "D1:1", "speaker": "Alex", "text": "I got a new job."}],
+        },
+        "qa": [{"question": "What did Alex get?", "answer": "a new job", "category": 2}],
+    }
+    monkeypatch.setattr(evaluate_mod, "load_locomo", lambda data_path=None: [fake_conv])
+
+    class FakePipeline:
+        def __init__(self, llm):
+            self.llm = llm
+
+        def ingest_text_turn(self, text):
+            pass
+
+        def retrieve(self, query, top_k=5):
+            return []
+
+    llm = _make_extraction_llm()
+    llm.generate.side_effect = None
+    llm.generate.return_value = "a new job"
+    # Bare MagicMock attribute access auto-creates a nested MagicMock, which
+    # isn't JSON serializable -- the fingerprint dict includes these two
+    # fields, so they need real (string) values before the checkpoint write.
+    llm.model_name = "mock-model"
+    llm._backend = "mock"
+
+    checkpoint_path = str(tmp_path / "checkpoint.json")
+    evaluate_mod.run_locomo(
+        llm_client=llm,
+        num_conversations=1,
+        pipeline_factory=lambda llm_client: FakePipeline(llm_client),
+        system_name="Mem0-style",
+        checkpoint_path=checkpoint_path,
+        verbose=False,
+    )
+
+    import json
+    with open(checkpoint_path) as f:
+        state = json.load(f)
+    assert state["fingerprint"]["system_name"] == "Mem0-style", (
+        "checkpoints for different systems against the same checkpoint_path "
+        "must never be silently confused for each other"
+    )
 
 
 # ── debug_extraction_for_turns ──────────────────────────────────────────────────

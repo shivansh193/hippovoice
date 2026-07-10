@@ -181,6 +181,8 @@ def run_locomo(
     batch_size: int = 50,
     decay_lambda: float = 0.001,
     relevance_weight: float = 0.85,
+    pipeline_factory=None,
+    system_name: str | None = None,
 ) -> dict:
     """
     Run LoCoMo evaluation.
@@ -202,6 +204,20 @@ def run_locomo(
     even at 663 turns elapsed; relevance_weight=0.85 (up from the pipeline
     default of 0.65) leans on relevance to do more of the ranking work now
     that availability barely discriminates between memories any more.
+    These two only apply to the default HippoVoicePipeline construction --
+    ignored if `pipeline_factory` is given, since baselines don't accept them.
+
+    `pipeline_factory`, if given, is a callable `(llm_client) -> pipeline`
+    used instead of the default HippoVoicePipeline construction -- e.g.
+    `lambda llm: Mem0Baseline(llm_client=llm)` to run the *real* LoCoMo QA
+    benchmark (not just the synthetic signal/noise one) against a baseline,
+    under the identical LLM, data, and scoring as HippoVoice. This is the
+    only way to compare against Mem0/A-MEM/NaiveRAG in a way that isolates
+    the memory architecture's contribution rather than conflating it with
+    whatever LLM their own published numbers used. `system_name` is
+    required alongside a custom `pipeline_factory` (used in the checkpoint
+    fingerprint, so a HippoVoice run and a Mem0-style run against the same
+    `checkpoint_path` can never be silently confused for each other).
 
     `max_qa_per_conversation` caps QA pairs per conversation -- useful for a
     cheap smoke test (a full run is ~150-250 QA pairs x 10 conversations,
@@ -248,12 +264,26 @@ def run_locomo(
     """
     from pipeline import HippoVoicePipeline
 
+    if pipeline_factory is None:
+        if system_name is not None:
+            raise ValueError("system_name is only meaningful alongside a custom pipeline_factory")
+        system_name = "HippoVoice"
+
+        def pipeline_factory(llm):
+            return HippoVoicePipeline(
+                llm_client=llm, text_only=True,
+                decay_lambda=decay_lambda, relevance_weight=relevance_weight,
+            )
+    elif system_name is None:
+        raise ValueError("system_name is required alongside a custom pipeline_factory")
+
     if pipeline is None:
         pipeline = HippoVoicePipeline(llm_client=llm_client, text_only=True)
 
     conversations = load_locomo(data_path)[:num_conversations]
 
     fingerprint = {
+        "system_name": system_name,
         "model_name": getattr(pipeline.llm, "model_name", None),
         "backend": getattr(pipeline.llm, "_backend", None),
         "num_conversations": num_conversations,
@@ -295,10 +325,7 @@ def run_locomo(
             continue
 
         # Fresh pipeline per conversation -- memory shouldn't leak across conversations
-        conv_pipeline = HippoVoicePipeline(
-            llm_client=pipeline.llm, text_only=True,
-            decay_lambda=decay_lambda, relevance_weight=relevance_weight,
-        )
+        conv_pipeline = pipeline_factory(pipeline.llm)
 
         turns = _flatten_conversation(conv["conversation"])
         if verbose:
