@@ -6,6 +6,42 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **`run_locomo()` could never actually evaluate the baselines
+  (Mem0Baseline/AMemBaseline/NaiveRAG) on the real, F1-scored LoCoMo QA
+  benchmark -- only on the separate synthetic signal/noise one.** It
+  hardcoded `conv_pipeline = HippoVoicePipeline(...)` per conversation
+  regardless of what was passed in. Comparing our avg F1 directly against
+  Mem0/A-MEM's own published LoCoMo numbers isn't fair either way -- their
+  papers typically use a different (GPT-4-class) backbone LLM and an
+  LLM-as-judge scoring methodology, not LoCoMo's own strict token-F1 we
+  replicate -- so the only way to isolate the memory architecture as the
+  single variable is to run all four systems through the identical LLM,
+  data, and scoring ourselves.
+
+  Added `pipeline_factory` (a `(llm_client) -> pipeline` callable) and
+  `system_name` params to `run_locomo()`; defaults preserve the exact
+  existing HippoVoice behavior. `system_name` is required alongside a
+  custom `pipeline_factory` and vice versa, and both are validated with a
+  `ValueError` before any data loading or LLM calls happen. Added
+  `system_name` to the checkpoint fingerprint too -- otherwise a HippoVoice
+  run and a Mem0-style run sharing a `checkpoint_path` could silently
+  resume from each other's results.
+
+  `scripts/run_full_locomo.py` now takes `--system
+  hippovoice|mem0|amem|naive`, each writing its own checkpoint/results
+  file. `NaiveRAG` needed a small adapter in the script (not a change to
+  the baseline itself) -- it has no `.llm` attribute since it doesn't use
+  one for memory management, but `run_locomo`'s QA-answering step always
+  calls `conv_pipeline.llm.generate(...)` regardless of system, so the
+  factory attaches the shared client after construction.
+
+  Validated locally with a fully mocked `run_locomo` call (fake
+  conversation + fake pipeline, no dataset or real LLM needed) confirming
+  the factory is actually used instead of `HippoVoicePipeline`, and that
+  the fingerprint records the right `system_name`. **Not yet run for real**
+  -- next step is queuing all four systems through the full 10-conversation
+  benchmark.
+
 - **Confirmed on a real, genuinely-fresh run with both the decay/relevance
   fix (`cf0d3d1`) and date-preservation fix (`73491b2`) together: LoCoMo
   avg F1 jumped from 5.4% to 15.1% (bins {near_zero: 41→31, partial:
