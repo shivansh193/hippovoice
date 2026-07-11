@@ -732,6 +732,52 @@ Add to this list; don't fix silently in passing.
   adding a benchmark test path that runs against a real small LLM (not just
   CPU-mocked) to catch this class of drift, if that's affordable.
 
+## Fixed (continued)
+
+- **First full (10-conversation, all-QA) Kaggle commit run (2026-07-11)
+  produced a real result — `avg F1 = 24.1% over 1540 questions` (bins:
+  near_zero 966, partial 379, high 195) — but three separate bugs meant the
+  checkpoint/results JSON never actually reached the Output tab, and a
+  later cell crashed the whole commit:**
+
+  1. **`colab.ipynb`'s Voice Test cell crashed the entire "Save & Run All
+     (Commit)" job.** There's no microphone in a headless batch commit, so
+     the JS recorder cell never actually fires and `/content/user_input.wav`
+     is never created — but the next cell unconditionally called
+     `transcribe_with_embedding` on that path, `ffmpeg` failed with `No such
+     file or directory`, and papermill re-raised it as
+     `PapermillExecutionError`, marking the whole commit failed. Distinct
+     from the earlier-logged Kaggle JS `await` crash in the same section
+     (see below) — this is a separate, Python-side failure mode. Fixed by
+     guarding cell-26 (`if not os.path.exists(AUDIO_PATH): skip`) and
+     cell-28 (skip TTS if `response_text` was never set) so a cell that's
+     inherently interactive-only can't take down a multi-hour unattended
+     run.
+  2. **`CHECKPOINT_PATH` (LoCoMo cell) and the Save Results cell's output
+     path were both hardcoded to `/content/...`.** `/content` is Colab-only
+     scratch space — on Kaggle it's a plain, non-persisted directory, so
+     everything written there survives only until the container tears down
+     and never shows up in the Output tab. Confirmed directly: the Output
+     tab after this run showed only the git-cloned repo, no checkpoint or
+     results file. (The 24.1% figure wasn't lost only because it was also
+     printed to the log, which was captured separately — a JSON artifact
+     from that run does not exist.) Fixed both paths to auto-detect
+     `/kaggle/working` if present else `/content`, mirroring the `REPO_DIR`
+     pattern already used in the Step 2 clone cell.
+  3. **The Save Results cell (cell-30) read `locomo_result['accuracy']` /
+     `['correct']`, which haven't existed since the F1-scoring rewrite
+     earlier this session** — `run_locomo()` returns `avg_f1`/`total`/
+     `bins`/`details`. Would have raised `KeyError` even with the path fix
+     above, on Colab or Kaggle. Fixed to use the real keys. Also guarded
+     the Colab-only `google.colab.files.download` call, which raises
+     `ModuleNotFoundError` on Kaggle (not something the earlier crash even
+     let execution reach, but would have failed on the very next Kaggle
+     run once #1 was fixed).
+
+  None of this affects the 24.1% number itself, which is real and already
+  fully captured (aggregate + full per-question breakdown) from the run's
+  log output.
+
 ## Open — carried over from earlier session (context.md)
 
 - Header table in `colab.ipynb` says Qwen3-4B, but the "Load LLM" cell
