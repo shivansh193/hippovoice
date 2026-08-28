@@ -306,16 +306,30 @@ class HippoAudioPipeline:
             ))
         summary = ". ".join(parts)
 
-        if self._tts is None:
+        # Confirmed for real on a live multi-turn run (not just suspected):
+        # reusing one pyttsx3 engine instance across repeated synthesize()
+        # calls reliably deadlocks its SAPI5 COM loop on Windows. Turn 1
+        # never needs this method (nothing to inject yet), so a cached
+        # engine's *first* real use always looks fine in a quick smoke
+        # test -- the deadlock only shows up on the second synthesis call
+        # in the same process, i.e. turn 3+ of a real conversation, which
+        # is exactly the multi-turn case this whole method exists for. Real
+        # usage therefore builds a fresh engine every call; self._tts stays
+        # purely a test-injection seam (existing tests mock this out
+        # entirely, so they never exercise the reuse path this comment
+        # warns about).
+        if self._tts is not None:
+            engine = self._tts
+        else:
             from tts.model import load_tts
-            self._tts = load_tts()
+            engine = load_tts()
 
         import tempfile
         import os
         from tts.synthesize import synthesize
 
         context_audio_path = tempfile.mktemp(suffix=".wav")
-        synthesize(self._tts, summary, context_audio_path)
+        synthesize(engine, summary, context_audio_path)
 
         combined_path = tempfile.mktemp(suffix=".wav")
         _concatenate_audio(context_audio_path, user_audio_path, combined_path)

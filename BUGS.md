@@ -6,6 +6,51 @@ Add to this list; don't fix silently in passing.
 
 ## Fixed
 
+- **Track 2 (`HippoAudioPipeline` + `GeminiLiveAudioModel`): two real bugs
+  found via a live, non-mocked multi-turn run, both now fixed and
+  re-verified for real.** Building STM (`[[pipeline_audio2audio.py]]`) and
+  a real Gemini Live API adapter was the easy part; getting genuine memory
+  *conditioning* (not just capture) working end-to-end surfaced two bugs a
+  mocked/local test suite couldn't have caught.
+
+  1. **pyttsx3 SAPI5 COM deadlock on Windows from engine reuse — caused a
+     real multi-hour hang in production, not just in tests.** This exact
+     bug was found once already earlier this session while writing STM
+     tests and worked around only in test code at the time; the real
+     pipeline code (`_build_context_audio` caching one `self._tts` engine
+     instance and reusing it across calls) was never fixed, and a live
+     multi-turn demo run hung for hours confirming it's a genuine
+     production issue, not a test-only artifact. Fixed: `_build_context_audio`
+     now creates a fresh `load_tts()` engine per call instead of reusing a
+     cached one (`self._tts` stays purely a test-injection seam). Applied
+     the same fix to the demo script's own `synth()` helper (fresh
+     `pyttsx3.init()` per call). Verified via a full `tests/test_pipeline_audio2audio.py`
+     run (9/9 passing, ~161s) and a real demo re-run with no hang.
+
+  2. **Gemini Live API's automatic voice-activity detection silently
+     truncated multi-segment audio, so injected memory context never
+     actually reached the model.** `HippoAudioPipeline` concatenates a
+     synthesized context clip (STM+LTM summary) with the real user audio
+     before sending it to the model. With automatic VAD (the API default),
+     the natural pause between those two segments got treated as
+     end-of-turn — the model started responding after only the context
+     clip, before the real trailing question was ever processed. Confirmed
+     directly via the model's own `input_transcription`: it showed only the
+     context, never the actual question, even though STM/LTM state and
+     audio concatenation were all correct internally — this looked like a
+     generation/relevance failure until the raw input transcript was
+     logged. Fixed in `[[gemini_live_model.py]]` by disabling automatic
+     activity detection (`realtime_input_config.automatic_activity_detection.disabled=True`)
+     and manually bounding the whole context+question blob with
+     `activity_start`/`activity_end` (confirmed against Google's own docs
+     at https://ai.google.dev/gemini-api/docs/live-guide before
+     implementing, not guessed). Re-verified for real after the fix: a fact
+     stated in turn 1 ("My dog's name is Max"), asked about again in turn 3
+     ("What's my dog's name again?"), correctly produced "Your dog's name
+     is Max." — genuine memory conditioning, not just capture. Added
+     `test_multi_segment_audio_is_not_truncated_by_vad` (marked
+     `@pytest.mark.live_api`) as a permanent regression guard.
+
 - **`run_locomo()` could never actually evaluate the baselines
   (Mem0Baseline/AMemBaseline/NaiveRAG) on the real, F1-scored LoCoMo QA
   benchmark -- only on the separate synthetic signal/noise one.** It
