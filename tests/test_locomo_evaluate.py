@@ -226,6 +226,69 @@ def test_system_name_requires_custom_pipeline_factory():
         run_locomo(llm_client=object(), system_name="not really custom")
 
 
+def test_custom_pipeline_factory_never_imports_hippovoicepipeline(monkeypatch):
+    """Confirmed as a real crash on Kaggle: run_locomo used to unconditionally
+    `from pipeline import HippoVoicePipeline` at the top of the function --
+    which pulls in memory/store.py's module-level chromadb/networkx/
+    sentence-transformers imports -- even for a custom pipeline_factory that
+    never touches HippoVoicePipeline or HippoMemory at all (WeightEditBaseline
+    included). A Kaggle notebook that deliberately didn't install chromadb
+    for a weight-editing-only benchmark hit ModuleNotFoundError from that
+    import line alone, before reaching any code that actually needed it.
+
+    Simulates "chromadb genuinely isn't installed" by making `import pipeline`
+    raise -- run_locomo must still succeed when given both a custom
+    pipeline_factory and an explicit llm_client, since neither the fingerprint
+    nor pipeline_factory's own call needs a real HippoVoicePipeline."""
+    import builtins
+    import sys
+
+    import benchmarks.locomo.evaluate as evaluate_mod
+
+    fake_conv = {
+        "conversation": {
+            "session_1_date_time": "1 May, 2023",
+            "session_1": [{"dia_id": "D1:1", "speaker": "Alex", "text": "I got a new job."}],
+        },
+        "qa": [{"question": "What did Alex get?", "answer": "a new job", "category": 2}],
+    }
+    monkeypatch.setattr(evaluate_mod, "load_locomo", lambda data_path=None: [fake_conv])
+    monkeypatch.delitem(sys.modules, "pipeline", raising=False)
+
+    real_import = builtins.__import__
+
+    def _blocked_import(name, *args, **kwargs):
+        if name == "pipeline":
+            raise ModuleNotFoundError("No module named 'chromadb'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _blocked_import)
+
+    class FakePipeline:
+        def __init__(self, llm):
+            self.llm = llm
+
+        def ingest_text_turn(self, text):
+            pass
+
+        def retrieve(self, query, top_k=5):
+            return []
+
+    llm = _make_extraction_llm()
+    llm.generate.side_effect = None
+    llm.generate.return_value = "a new job"
+
+    result = evaluate_mod.run_locomo(
+        llm_client=llm,
+        num_conversations=1,
+        pipeline_factory=lambda llm_client: FakePipeline(llm_client),
+        system_name="FakeSystem",
+        verbose=False,
+    )
+
+    assert result["total"] == 1
+
+
 def test_pipeline_factory_is_used_instead_of_hippovoice(monkeypatch):
     import benchmarks.locomo.evaluate as evaluate_mod
 

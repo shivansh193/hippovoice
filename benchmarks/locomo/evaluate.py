@@ -262,9 +262,19 @@ def run_locomo(
              "bins": {"near_zero": int, "partial": int, "high": int},
              "details": [...]}
     """
-    from pipeline import HippoVoicePipeline
-
+    # Deliberately NOT a module-level or unconditional import here: pipeline.py
+    # pulls in memory/store.py, which imports chromadb/networkx/sentence-
+    # transformers at module level. A custom pipeline_factory (WeightEditBaseline,
+    # Mem0Baseline, ...) never touches HippoVoicePipeline or HippoMemory at all,
+    # so forcing that import unconditionally forces those dependencies onto
+    # every baseline-comparison run too. Confirmed as a real crash: a Kaggle
+    # notebook for the weight-editing benchmark deliberately didn't install
+    # chromadb (genuinely unneeded for that baseline) and hit
+    # `ModuleNotFoundError: No module named 'chromadb'` from this import line,
+    # before ever reaching any code that actually needed it.
     if pipeline_factory is None:
+        from pipeline import HippoVoicePipeline
+
         if system_name is not None:
             raise ValueError("system_name is only meaningful alongside a custom pipeline_factory")
         system_name = "HippoVoice"
@@ -278,7 +288,17 @@ def run_locomo(
         raise ValueError("system_name is required alongside a custom pipeline_factory")
 
     if pipeline is None:
-        pipeline = HippoVoicePipeline(llm_client=llm_client, text_only=True)
+        if llm_client is not None:
+            # `pipeline` past this point is only ever read via `.llm` (see
+            # the comment above the pipeline_factory branch for why a full
+            # HippoVoicePipeline isn't needed just for that).
+            class _LLMOnly:
+                pass
+            pipeline = _LLMOnly()
+            pipeline.llm = llm_client
+        else:
+            from pipeline import HippoVoicePipeline
+            pipeline = HippoVoicePipeline(llm_client=llm_client, text_only=True)
 
     conversations = load_locomo(data_path)[:num_conversations]
 
