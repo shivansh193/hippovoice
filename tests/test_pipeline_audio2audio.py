@@ -4,11 +4,22 @@ extraction, storage, retrieval, and context-audio construction against
 MockAudioToAudioModel (no model weights, no GPU, no download) before any
 real audio-to-audio model gets chosen or any AWS GPU instance time gets
 spent. See pipeline_audio2audio.py's module docstring for why.
+
+Real pyttsx3 gets exercised exactly once, in
+test_real_tts_produces_valid_context_audio below, not repeatedly across
+every test in this file. Confirmed on a real local run: calling
+tts.synthesize.synthesize() more than once or twice within a single test
+process reliably deadlocks pyttsx3's underlying SAPI5 COM loop on
+Windows -- one test with 3 sequential real synthesis calls hung
+indefinitely and had to be force-killed. All other tests here patch
+load_tts/synthesize with a fast, deterministic stand-in instead; the
+audio-mechanics logic itself (concatenation, resampling) is already fully
+covered separately below without touching pyttsx3 at all.
 """
 
 import json
 import os
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import soundfile as sf
@@ -34,12 +45,47 @@ def _make_llm(memory_type="event"):
     return mock
 
 
+def _make_llm_extracts_nothing():
+    """Every turn produces zero memories -- isolates STM (recent_turns) from
+    LTM (retrieved), since with this mock the memory stores stay genuinely
+    empty regardless of how many turns are processed."""
+    mock = MagicMock()
+    mock.generate.side_effect = lambda system, messages, max_tokens=512: "[]"
+    return mock
+
+
 def _make_silent_wav(path: str, duration_s: float = 0.5, sr: int = 16000):
     """Tiny synthetic fixture -- avoids needing a real recorded audio file
     (tests/fixtures/ has none, see BUGS.md) for tests that only care about
     plumbing, not actual audio content."""
     samples = np.zeros(int(duration_s * sr), dtype=np.float32)
     sf.write(path, samples, sr)
+
+
+def _fake_synthesize(engine, text, output_path):
+    """Stand-in for tts.synthesize.synthesize -- see module docstring for
+    why real pyttsx3 isn't used here. 22050Hz matches this machine's actual
+    pyttsx3 output rate (confirmed earlier), so tests exercising the
+    resampling path still reflect a realistic mismatch against 16000Hz
+    user audio."""
+    _make_silent_wav(output_path, duration_s=0.2, sr=22050)
+
+
+class _TtsPatch:
+    """Small helper bundling the two patches _build_context_audio needs
+    mocked together, since it imports both load_tts and synthesize
+    lazily/locally inside the method rather than at module level."""
+
+    def __enter__(self):
+        self._p1 = patch("tts.model.load_tts", return_value=MagicMock())
+        self._p2 = patch("tts.synthesize.synthesize", side_effect=_fake_synthesize)
+        self._p1.__enter__()
+        self._p2.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        self._p2.__exit__(*exc)
+        self._p1.__exit__(*exc)
 
 
 def test_process_turn_calls_model_and_stores_memory(tmp_path):
@@ -59,7 +105,10 @@ def test_process_turn_calls_model_and_stores_memory(tmp_path):
 
 def test_no_context_audio_on_first_turn(tmp_path):
     """Nothing stored yet -- _build_context_audio should pass the raw input
-    straight through rather than synthesizing/concatenating for no reason."""
+    straight through rather than synthesizing/concatenating for no reason.
+    No TTS mocking needed here precisely because nothing should be
+    synthesized at all -- a real pyttsx3 call happening here would itself
+    be a test failure worth catching."""
     audio_in = str(tmp_path / "turn1.wav")
     _make_silent_wav(audio_in)
 
@@ -84,8 +133,9 @@ def test_context_audio_injected_when_relevant_memory_exists(tmp_path):
     model = MockAudioToAudioModel()
     pipe = HippoAudioPipeline(audio_model=model, llm_client=_make_llm(memory_type="fact"))
 
-    pipe.process_turn(turn1_audio, "my dog's name is max")
-    pipe.process_turn(turn2_audio, "what's my dog's name again")
+    with _TtsPatch():
+        pipe.process_turn(turn1_audio, "my dog's name is max")
+        pipe.process_turn(turn2_audio, "what's my dog's name again")
 
     assert model.calls[0] == turn1_audio  # first turn: nothing to inject
     assert model.calls[1] != turn2_audio  # second turn: context was prepended
@@ -130,6 +180,44 @@ def test_concatenate_audio_resamples_mismatched_sample_rates(tmp_path):
     assert len(data) == int(0.3 * 16000) + int(0.5 * 16000)
 
 
+def test_stm_alone_triggers_context_even_with_nothing_stored(tmp_path):
+    """LTM (retrieved) stays empty the whole time -- extraction produces
+    nothing to store. STM should still inject context on turn 2 purely from
+    the raw recent-turn buffer, proving STM and LTM are actually independent
+    mechanisms, not STM riding along only because LTM also fires."""
+    turn1_audio = str(tmp_path / "turn1.wav")
+    turn2_audio = str(tmp_path / "turn2.wav")
+    _make_silent_wav(turn1_audio)
+    _make_silent_wav(turn2_audio)
+
+    model = MockAudioToAudioModel()
+    pipe = HippoAudioPipeline(audio_model=model, llm_client=_make_llm_extracts_nothing())
+
+    with _TtsPatch():
+        pipe.process_turn(turn1_audio, "just saying hello")
+        pipe.process_turn(turn2_audio, "anyway, how's it going")
+
+    assert pipe.semantic_memory.count() == 0
+    assert pipe.episodic_memory.count() == 0  # confirms LTM genuinely never fired
+    assert model.calls[0] == turn1_audio        # turn 1: no STM yet either
+    assert model.calls[1] != turn2_audio        # turn 2: STM alone injected context
+
+
+def test_stm_window_ages_out_oldest_turn(tmp_path):
+    """recent_turns is a maxlen deque -- confirms it actually behaves like a
+    sliding window (oldest turn dropped) rather than growing unbounded."""
+    model = MockAudioToAudioModel()
+    pipe = HippoAudioPipeline(audio_model=model, llm_client=_make_llm_extracts_nothing(), stm_window=2)
+
+    with _TtsPatch():
+        for i in range(4):
+            audio = str(tmp_path / f"turn{i}.wav")
+            _make_silent_wav(audio)
+            pipe.process_turn(audio, f"turn number {i}")
+
+    assert list(pipe.recent_turns) == ["turn number 2", "turn number 3"]
+
+
 def test_fact_and_event_route_to_correct_stores(tmp_path):
     audio_in = str(tmp_path / "turn1.wav")
     _make_silent_wav(audio_in)
@@ -145,3 +233,23 @@ def test_fact_and_event_route_to_correct_stores(tmp_path):
     pipe2.process_turn(audio_in, "user went hiking yesterday")
     assert pipe2.episodic_memory.count() == 1
     assert pipe2.semantic_memory.count() == 0
+
+
+def test_real_tts_produces_valid_context_audio(tmp_path):
+    """The one test in this file that touches real pyttsx3 -- confirms the
+    actual dependency wires up correctly end to end, exactly once, rather
+    than never being exercised for real at all."""
+    user_audio = str(tmp_path / "turn.wav")
+    _make_silent_wav(user_audio, duration_s=0.5, sr=16000)
+
+    model = MockAudioToAudioModel()
+    pipe = HippoAudioPipeline(audio_model=model, llm_client=_make_llm())
+
+    combined = pipe._build_context_audio(
+        [{"content": "user's dog is named max"}], ["earlier the user said hi"], user_audio
+    )
+
+    assert combined != user_audio
+    data, sr = sf.read(combined)
+    assert len(data) > 0
+    assert sr == 16000  # resampled to match the real user audio's rate

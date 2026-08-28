@@ -14,17 +14,32 @@ This module is that next step, built model-agnostic on purpose: the
 AudioToAudioModel interface below makes zero assumptions about any specific
 model's internals (no assumption it accepts a text prefix in its input_ids,
 no assumption it exposes a system-prompt parameter), so whichever real model
-gets chosen after this dry-run validates the plumbing (Moshi, Qwen2.5-Omni,
-...) plugs in as one small adapter class without touching this pipeline's
-logic at all.
+gets chosen after this dry-run validates the plumbing (Gemini Live API,
+Moshi, Qwen2.5-Omni, ...) plugs in as one small adapter class without
+touching this pipeline's logic at all.
 
 Context gets injected the one way that works regardless of a model's input
-API: synthesizing a short spoken summary of retrieved memories and
-prepending it to the audio the model actually hears, so the model receives
-it as part of the same utterance instead of needing a text-injection hook
-into its own architecture. This was flagged as the "probably try this first"
-option in the Track 2 doc precisely because it needs zero changes to
-whatever model ends up plugged in.
+API: synthesizing a short spoken summary and prepending it to the audio the
+model actually hears, so the model receives it as part of the same
+utterance instead of needing a text-injection hook into its own
+architecture. This was flagged as the "probably try this first" option in
+the Track 2 doc precisely because it needs zero changes to whatever model
+ends up plugged in.
+
+Two distinct memory tiers feed that summary, mirroring the actual
+architectural distinction in a normal LLM chat session:
+  - STM (short-term): the last `stm_window` raw turns, kept verbatim, the
+    same role a text LLM's message history / context window plays. This
+    didn't exist before -- extraction ran on every turn and the raw text
+    was discarded immediately after, so even the exact wording of what was
+    just said was gone a moment later. Real, but session-scoped and
+    unweighted by salience -- it ages out by being pushed off the end of a
+    fixed-size window, not by decay.
+  - LTM (long-term): the existing HippoRAG retrieval + Ebbinghaus decay
+    system, completely unchanged. Salience-weighted, persistent across
+    however many turns, survives across sessions via save()/load().
+Both get synthesized into the same spoken context clip; STM covers "what
+was just said," LTM covers "what's been retained from further back."
 
 MockAudioToAudioModel exists so this whole pipeline -- extraction, storage,
 retrieval, context-audio construction -- can be validated end-to-end on a
@@ -141,6 +156,7 @@ class HippoAudioPipeline:
         decay_lambda: float | None = None,
         relevance_weight: float | None = None,
         tts_engine=None,
+        stm_window: int = 5,
     ):
         self.audio_model = audio_model
         self.decay_lambda = decay_lambda if decay_lambda is not None else DEFAULT_DECAY_LAMBDA
@@ -149,6 +165,16 @@ class HippoAudioPipeline:
         self.current_turn = 0
         self.semantic_memory = HippoMemory(collection_name="hippoaudio_semantic", persist_path=memory_path)
         self.episodic_memory = HippoMemory(collection_name="hippoaudio_episodic", persist_path=memory_path)
+
+        # STM: last stm_window raw turns, verbatim, unweighted -- see module
+        # docstring for why this is architecturally distinct from LTM rather
+        # than just "more retrieval." A deque(maxlen=...) ages out the
+        # oldest turn automatically once full; that's the whole mechanism,
+        # no salience/decay math involved, same as a text LLM's message
+        # history sliding out of a fixed context window.
+        from collections import deque
+        self.stm_window = stm_window
+        self.recent_turns = deque(maxlen=stm_window)
 
         self._llm = llm_client
         self._tts = tts_engine  # lazy-loaded on first real use; injectable for tests
@@ -167,18 +193,25 @@ class HippoAudioPipeline:
         """
         # 1. Retrieve BEFORE generating -- this is the actual conditioning
         #    step colab_track2.ipynb's Mini-Omni pass never reached.
+        #    STM (recent_turns) reflects turns *before* this one -- the
+        #    current turn's own audio is the actual input, it doesn't also
+        #    need to be echoed back to the model as context about itself.
         retrieved = self.retrieve(user_text, top_k=5)
 
-        # 2. Build the context-injected audio the model will actually hear.
-        input_audio = self._build_context_audio(retrieved, user_audio_path)
+        # 2. Build the context-injected audio the model will actually hear,
+        #    combining STM (recent verbatim turns) and LTM (retrieved).
+        input_audio = self._build_context_audio(retrieved, list(self.recent_turns), user_audio_path)
 
         # 3. Real audio-to-audio turn.
         response_audio, transcript = self.audio_model.respond(input_audio)
 
         # 4. Extract + store from what the user said -- same as
         #    HippoVoicePipeline, extraction always runs on the user's turn,
-        #    never the model's own reply.
+        #    never the model's own reply. STM updates after generation for
+        #    the same reason retrieval happens before it: this turn becomes
+        #    "recent history" for the *next* turn, not for itself.
         self._store_memories(user_text)
+        self.recent_turns.append(user_text)
         self._maybe_decay()
         self.current_turn += 1
         return response_audio, transcript
@@ -231,7 +264,10 @@ class HippoAudioPipeline:
         import json
         self.semantic_memory.save(str(Path(path, "semantic")))
         self.episodic_memory.save(str(Path(path, "episodic")))
-        Path(path, "state.json").write_text(json.dumps({"current_turn": self.current_turn}))
+        Path(path, "state.json").write_text(json.dumps({
+            "current_turn": self.current_turn,
+            "recent_turns": list(self.recent_turns),
+        }))
 
     def load(self, path: str):
         from pathlib import Path
@@ -240,24 +276,35 @@ class HippoAudioPipeline:
         self.episodic_memory.load(str(Path(path, "episodic")))
         state_file = Path(path) / "state.json"
         if state_file.exists():
-            self.current_turn = json.loads(state_file.read_text())["current_turn"]
+            state = json.loads(state_file.read_text())
+            self.current_turn = state["current_turn"]
+            # older saves won't have this key -- treat as empty STM rather
+            # than KeyError, since a save from before STM existed is still
+            # a valid save, just without recent-turn history to restore.
+            self.recent_turns.extend(state.get("recent_turns", []))
 
     # ── internal ──────────────────────────────────────────────────────────
 
-    def _build_context_audio(self, retrieved: list[dict], user_audio_path: str) -> str:
+    def _build_context_audio(self, retrieved: list[dict], recent_turns: list[str], user_audio_path: str) -> str:
         """
         Model-agnostic context injection: synthesize a short spoken summary
-        of retrieved memories and prepend it to the user's actual input
-        audio. Returns user_audio_path unchanged when there's nothing to
-        retrieve yet (turn 1, or a query with no relevant memories) --
-        no point synthesizing and concatenating silence-equivalent content.
+        of STM (recent_turns, verbatim) and LTM (retrieved, salience-ranked)
+        and prepend it to the user's actual input audio. Returns
+        user_audio_path unchanged when both are empty (turn 1 specifically
+        -- no prior turns for STM, nothing stored yet for LTM) -- no point
+        synthesizing and concatenating silence-equivalent content.
         """
-        if not retrieved:
+        if not retrieved and not recent_turns:
             return user_audio_path
 
-        summary = "some things to remember: " + "; ".join(
-            r.get("content", "") for r in retrieved if r.get("content")
-        )
+        parts = []
+        if recent_turns:
+            parts.append("earlier in this conversation: " + "; ".join(recent_turns))
+        if retrieved:
+            parts.append("some other things to remember: " + "; ".join(
+                r.get("content", "") for r in retrieved if r.get("content")
+            ))
+        summary = ". ".join(parts)
 
         if self._tts is None:
             from tts.model import load_tts
