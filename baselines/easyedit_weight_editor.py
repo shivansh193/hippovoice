@@ -3,7 +3,7 @@ EasyEditWeightEditor -- the real WeightEditor implementation (see
 baselines/weight_edit_baseline.py for the interface and the mock that
 validates everything except this file). Wraps EasyEdit's ROME/MEMIT on
 GPT-2 XL. Needs a GPU; not exercised by the local test suite at all --
-validated on Kaggle instead (see kaggle_weight_edit_benchmark.ipynb).
+validated on Kaggle instead (see kaggle_full_benchmark.ipynb).
 
 Kept as its own module, not added to weight_edit_baseline.py, specifically
 so importing that module (which the local mock-based tests do) never
@@ -73,6 +73,16 @@ class EasyEditWeightEditor:
         # takes the path WITHOUT a .yaml extension (it appends that itself).
         hparams_path = f"{self.easyedit_dir}/hparams/{self.method}/gpt2-xl"
         hparams = hparams_cls.from_hparams(hparams_path)
+
+        # Confirmed on a real run: the shipped hparams/{ROME,MEMIT}/gpt2-xl.yaml
+        # hardcodes model_name: "./hugging_cache/gpt2-xl" -- a local-directory
+        # convention for someone who already downloaded the model by hand, not
+        # a HuggingFace Hub repo id. Passed straight through, this fails with
+        # `HFValidationError: Repo id must be in the form 'repo_name' or
+        # 'namespace/repo_name'` before ever touching a real model. Override
+        # it with the actual public Hub id so from_pretrained downloads it
+        # like any other model reference in this project.
+        hparams.model_name = "gpt2-xl"
         self.editor = BaseEditor.from_hparams(hparams)
 
         # Full CPU snapshot of pristine weights, taken once right after
