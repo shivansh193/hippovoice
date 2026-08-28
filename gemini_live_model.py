@@ -24,6 +24,23 @@ gets resampled to 16kHz mono here regardless of what HippoAudioPipeline
 hands it (which itself is already resampled to whatever the "real user
 audio" rate is by _concatenate_audio -- this adapter doesn't assume that
 happens to already be 16kHz).
+
+That first test was a single, un-prefixed utterance, though, and a real
+multi-turn HippoAudioPipeline run surfaced a second bug that single-turn
+test couldn't have caught: with automatic voice-activity detection (the
+API's default), the natural pause between the synthesized context clip
+and the real question appended after it got treated as end-of-turn, so
+the model started responding before the real question audio was ever
+processed -- confirmed via the model's own input transcript, which showed
+only the context, never the actual question. Fixed by disabling automatic
+activity detection (realtime_input_config.automatic_activity_detection
+.disabled=True) and manually bounding the whole context+question blob
+with activity_start/activity_end, so the API treats everything sent in
+between as one continuous utterance instead of guessing where the turn
+ends from internal silence (see https://ai.google.dev/gemini-api/docs/live-guide).
+Re-confirmed for real after the fix: a fact stated in turn 1, asked about
+again in turn 3, produced "Your dog's name is Max." -- genuine memory
+conditioning, not just capture.
 """
 
 import asyncio
@@ -65,10 +82,23 @@ class GeminiLiveAudioModel(AudioToAudioModel):
 
         pcm_bytes = _read_as_pcm16(audio_path, GEMINI_INPUT_SAMPLE_RATE)
 
+        # Confirmed for real on a live multi-turn run: with automatic VAD
+        # (the default), the API treated the natural pause after the
+        # synthesized context clip as end-of-turn and started responding
+        # before the real question audio appended after it was ever
+        # processed -- the model's own input transcript showed only the
+        # context, never the actual question. Disabling automatic activity
+        # detection and manually bounding the whole context+question blob
+        # with activity_start/activity_end forces it to treat everything
+        # sent before activity_end as one continuous utterance instead of
+        # guessing where the turn ends from internal silence.
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(disabled=True),
+            ),
         )
 
         audio_chunks = []
@@ -76,10 +106,11 @@ class GeminiLiveAudioModel(AudioToAudioModel):
         output_transcript = ""
 
         async with self._client.aio.live.connect(model=self.model, config=config) as session:
+            await session.send_realtime_input(activity_start=types.ActivityStart())
             await session.send_realtime_input(
                 audio=types.Blob(data=pcm_bytes, mime_type=f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}")
             )
-            await session.send_realtime_input(audio_stream_end=True)
+            await session.send_realtime_input(activity_end=types.ActivityEnd())
 
             async for message in session.receive():
                 sc = message.server_content
