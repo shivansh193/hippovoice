@@ -210,11 +210,47 @@ class HippoAudioPipeline:
         #    never the model's own reply. STM updates after generation for
         #    the same reason retrieval happens before it: this turn becomes
         #    "recent history" for the *next* turn, not for itself.
-        self._store_memories(user_text)
-        self.recent_turns.append(user_text)
+        self.ingest_text_turn(user_text)
+        return response_audio, transcript
+
+    def ingest_text_turn(self, text: str) -> None:
+        """
+        Store-only: extract + save, update STM, advance the turn counter --
+        no audio, no generation. Factored out of process_turn's own storage
+        steps (which call this too, rather than duplicating the four lines)
+        specifically so a conversation's history can be ingested without
+        also forcing a spoken reply out of the model for every single turn.
+        Named to match every other baseline in this project (Mem0Baseline,
+        AMemBaseline, WeightEditBaseline all expose ingest_text_turn), so
+        benchmarks/locomo/evaluate_audio.py can ingest a LoCoMo transcript
+        into this pipeline exactly the way run_locomo ingests one into any
+        text pipeline -- same method name, same one-call-per-turn contract.
+        """
+        self._store_memories(text)
+        self.recent_turns.append(text)
         self._maybe_decay()
         self.current_turn += 1
-        return response_audio, transcript
+
+    def answer_question(self, question_text: str, question_audio_path: str) -> tuple[str, str]:
+        """
+        Read-only QA turn: retrieves and conditions generation exactly like
+        process_turn's steps 1-3, but never stores anything and never
+        touches STM or the turn counter -- mirrors how run_locomo's
+        text-pipeline QA step calls retrieve() + llm.generate() without
+        also calling ingest_text_turn() for the question itself (a
+        held-out benchmark question isn't part of the conversation's own
+        history, and asking it shouldn't change what the pipeline
+        "remembers" for the next real question).
+
+        question_audio_path is a separate param from question_text, not
+        derived from it, for the same reason process_turn keeps
+        user_audio_path/user_text separate: this pipeline makes no
+        assumption about how the caller produced the audio (TTS-synthesized
+        for a benchmark, a real recording in a live deployment).
+        """
+        retrieved = self.retrieve(question_text, top_k=5)
+        input_audio = self._build_context_audio(retrieved, list(self.recent_turns), question_audio_path)
+        return self.audio_model.respond(input_audio)
 
     def retrieve(self, query: str, top_k: int = 5) -> list[dict]:
         """
