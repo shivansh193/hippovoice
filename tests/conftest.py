@@ -5,9 +5,15 @@ GPU-dependent fixtures (canary_model, fish_model, llm_client) are marked @gpu
 and skipped automatically when CUDA is not available. Run with:
     pytest -m "not gpu"   # CPU-only (memory / logic tests)
     pytest                # all tests (requires A100)
+
+live_api-marked tests make real network calls to a paid/rate-limited external
+API (currently just Gemini) and are skipped automatically unless the relevant
+key is present in the environment -- opt-in, not something every contributor
+or CI run should be forced to hit just to run the normal suite.
 """
 
 import json
+import os
 import numpy as np
 import pytest
 from unittest.mock import MagicMock
@@ -17,6 +23,7 @@ from unittest.mock import MagicMock
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "gpu: requires CUDA GPU")
+    config.addinivalue_line("markers", "live_api: makes a real call to an external API (needs an API key in env)")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -26,6 +33,12 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "gpu" in item.keywords:
                 item.add_marker(skip_gpu)
+
+    if not os.environ.get("GEMINI_API_KEY"):
+        skip_live = pytest.mark.skip(reason="GEMINI_API_KEY not set")
+        for item in items:
+            if "live_api" in item.keywords:
+                item.add_marker(skip_live)
 
 
 # ── LLM mock ──────────────────────────────────────────────────────────────────

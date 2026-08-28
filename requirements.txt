@@ -18,6 +18,9 @@ python-dotenv>=1.0.0
 nltk>=3.8.0  # PorterStemmer for LoCoMo's real F1 scoring methodology
 pyttsx3>=2.90  # offline TTS used by tts/model.py -- was only ever ad-hoc
                # pip-installed in Kaggle/Colab cells, never actually listed here
+google-genai>=2.20.0  # Gemini Live API client, used by gemini_live_model.py
+                       # (Track 2's audio-to-audio backend -- API-based, no
+                       # self-hosted GPU needed since we never edit its weights)
 # NeMo ASR — install separately on Colab:
 # pip install nemo_toolkit[asr]
 # Fish TTS — install separately on Colab:
