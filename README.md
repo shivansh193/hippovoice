@@ -1,106 +1,120 @@
 # HippoVoice
 
-A biologically-inspired memory system for voice AI companions — Ebbinghaus-style
-decay plus HippoRAG-style graph retrieval, built to give a conversational agent
-memory that behaves more like a person's than a vector database's: durable facts
-stick around indefinitely, episodic details fade unless they're emotionally
-salient or get recalled again, and retrieval favors what's actually relevant
-over whatever was said most recently.
+A memory system for voice AI companions, built around two ideas borrowed
+from how human memory actually works: Ebbinghaus-style decay (things fade
+unless they matter or get recalled again) and HippoRAG-style graph
+retrieval. The goal is memory that behaves less like a vector database
+and more like a person's: a fact someone mentioned once sticks around,
+what they had for breakfast three weeks ago doesn't, and what actually
+gets pulled up when you ask a question is whatever's relevant, not
+whatever was said most recently.
 
-Benchmarked on real data, not a synthetic toy: [LoCoMo](https://github.com/snap-research/locomo)
-(10 long-term conversations, 369-689 turns each, real ground-truth QA pairs) —
-the same dataset Mem0, A-MEM, and MemoryBank report on.
+Benchmarked on real data. [LoCoMo](https://github.com/snap-research/locomo)
+has 10 long-term conversations, 369-689 turns each, with real ground-truth
+QA pairs. It's the same dataset Mem0, A-MEM, and MemoryBank report on.
 
 ## Results
 
-**LoCoMo (real benchmark, published F1 scoring methodology — stemmed token F1,
-category-branched):**
+**LoCoMo**, scored with the published methodology (stemmed token F1,
+category-branched, not a rough approximation of it):
 
 | System | avg F1 | Questions |
 |---|---|---|
-| **HippoVoice** | **24.1%** | 1540 (10 conversations, all QA pairs) |
+| HippoVoice | 24.1% | 1540 (10 conversations, all QA pairs) |
 
-Confirmed on a full run, 2026-07-11. Baseline comparisons (Mem0-style,
-A-MEM-style, NaiveRAG) run through the identical harness/LLM/scoring are
-in progress — see [BUGS.md](BUGS.md) for exact provenance and what's
-confirmed vs. still running.
+That run finished 2026-07-11. Baseline comparisons under the identical
+harness, LLM, and scoring (Mem0-style, A-MEM-style, NaiveRAG) are still
+running — check [BUGS.md](BUGS.md) for what's actually confirmed versus
+what's queued.
 
-**Signal/Noise benchmark (a separate, synthetic ~90-100 turn benchmark
-measuring what fraction of retrieved context is irrelevant noise):**
+There's also a smaller, synthetic benchmark (~90-100 turn conversations)
+for noise contamination: what fraction of retrieved context is actually
+irrelevant.
 
 | System | Noise rate |
 |---|---|
-| **HippoVoice** | **10%** (down from an earlier 20% after decay/relevance fixes) |
+| HippoVoice | 10% (was 20% before a decay/relevance fix) |
 | Mem0-style | 30% |
 | NaiveRAG | 30% |
 | A-MEM-style | 10% |
 
-(Mem0-style/NaiveRAG/A-MEM-style numbers are from the same measured run as
-HippoVoice's 20% figure — see `BUGS.md` for the exact commit. HippoVoice's
-noise rate improved further to 10% in a later fix; baselines weren't
-re-measured at that exact point, so treat 30%/30%/10% as the last confirmed
-baseline snapshot, not necessarily concurrent with HippoVoice's most recent
-number.)
+Worth being precise about this one: the Mem0/NaiveRAG/A-MEM numbers were
+measured against HippoVoice's earlier 20% result, not its current 10%.
+Baselines weren't rerun after the fix that got HippoVoice to 10%, so
+don't read that row as five numbers from one simultaneous run.
 
-Full history of what was tried, what broke, and how each result was
-verified lives in [BUGS.md](BUGS.md) — kept as a running log rather than
-cleaned up, since the false starts (and how they were caught) are as much
-the point as the final numbers.
+BUGS.md has the full history: what got tried, what broke, how each
+number was actually verified rather than assumed. It reads more like a
+lab notebook than a changelog, on purpose — the dead ends are as
+informative as the wins, and I didn't want to clean them out just to
+make the project look tidier than the work actually was.
 
 ## Architecture
 
-Two structurally distinct memory stores, not one undifferentiated vector
-index — this split is the core architectural bet of the project:
+The store is split in two, and that split is the main architectural
+decision in the codebase.
 
-- **Semantic memory** (`fact` / `preference` / `person` types): durable
-  knowledge that doesn't decay. "User's dog is named Max" doesn't become
-  less true or less retrievable as time passes.
-- **Episodic memory** (`event` type): specific occurrences, subject to
-  Ebbinghaus-style forgetting — salience decays over turns unless boosted
-  by emotional intensity or refreshed by being recalled again.
+**Semantic memory** holds facts, preferences, and people. It doesn't
+decay. "User's dog is named Max" isn't less true a month from now.
 
-**Why split at all**: an early version routed everything through one
-decaying store, and durable facts got physically deleted by the same
-forgetting cycle designed for fading episodic detail — a person doesn't
-forget their friend's name at the same rate they forget the specific
-sentence used to state it. Splitting by extracted type fixed this without
-weakening decay for what should genuinely fade.
+**Episodic memory** holds specific events. It decays the way Ebbinghaus
+described: salience drops over turns unless something boosts it, either
+emotional intensity or getting recalled again later.
 
-**Retrieval** (episodic): HippoRAG-style graph-walk expansion over
-candidate memories, reranked by a blended score —
-`relevance_weight * relevance + (1 - relevance_weight) * availability`,
-where availability is the memory's current Ebbinghaus salience,
-log-normalized against a forget threshold. Two simpler designs (raw
-unnormalized blending, reciprocal rank fusion) were tried and empirically
-rejected first — see `BUGS.md` for why. Semantic candidates are scored by
-relevance alone (no availability term), since a durable fact's relevance
-to a query doesn't depend on how long ago it was learned; blending in a
-constant availability term for these turned out to give every semantic-
-store hit a flat, unconditional bonus and blew up noise rate to 90% in
-testing before being caught and reverted.
+An earlier version ran everything through one decaying store, and the
+forgetting cycle meant to fade out stale episodic detail was quietly
+deleting durable facts along with it. That's backwards. A person doesn't
+forget a friend's name at the same rate they forget the exact sentence
+that friend used to introduce themselves. Splitting the store by
+extracted type fixed it without softening decay for the stuff that
+should genuinely fade.
 
-**Name-match disambiguation**: pure embedding similarity can't reliably
-tell two similarly-named people apart in a long conversation (confirmed
-directly: "Jon" and "John" pulled in each other's content). An exact,
-case-sensitive proper-noun match is scored as an independent signal
-alongside embedding relevance, with a full-store scan unioned into the
-candidate pool before reranking — the scan step was necessary in addition
-to the scoring bonus, since a correctly-named memory crowded out of the
-initial similarity-based seed pool never reaches reranking to be promoted.
+Episodic retrieval walks the graph HippoRAG-style, then reranks
+candidates on a blended score:
 
-**Decay tuning is scale-dependent, not a fixed constant**: `decay_lambda`
-tuned for ~90-100 turn conversations forgets almost every episodic memory
-well before a 369-689 turn LoCoMo conversation ends, independent of
-extraction or retrieval quality. Both `decay_lambda` and `relevance_weight`
-are explicit, overridable parameters (not hardcoded), with LoCoMo-scale
-defaults distinct from the pipeline's own short-conversation defaults.
+```
+relevance_weight * relevance + (1 - relevance_weight) * availability
+```
 
-**Extraction**: an LLM call per turn converts raw conversational text into
-typed memory fragments (fact/preference/person/event), with a prompt
-iterated multiple rounds against real model output — not assumed correct
-from wording alone — after early versions oscillated between
-over-extracting filler and under-extracting genuine facts. See `BUGS.md`
-for the full iteration history.
+Availability is the memory's current salience, log-normalized against a
+forget threshold. I tried two simpler approaches before landing here:
+raw unnormalized blending (availability spans something like 13 orders
+of magnitude, so it swamps relevance completely) and reciprocal rank
+fusion (works until the candidate pool is small, then rank 0 vs. rank 1
+barely means anything). Both are written up in BUGS.md with the numbers
+that killed them.
+
+Semantic candidates get scored on relevance alone, no availability term.
+A durable fact's relevance to a query has nothing to do with when it was
+learned. I found this out the hard way: blending in a constant
+availability term for semantic hits gave every one of them a flat bonus
+regardless of relevance, and noise rate jumped to 90% in testing before
+I caught it and reverted.
+
+Name matching needed its own fix. Embedding similarity alone can't
+reliably separate two similarly-named people in a long conversation.
+Confirmed this directly: content about "Jon" was getting pulled in by
+questions about "John," a different person entirely. The fix scores an
+exact, case-sensitive proper-noun match as its own signal, and it needed
+a full-store scan feeding into the candidate pool before reranking even
+happens. The scoring bonus alone wasn't enough. A correctly-named memory
+that never made the initial similarity-based seed pool never gets to
+reranking to be promoted by that bonus.
+
+Decay rate isn't one fixed number either. A `decay_lambda` tuned for a
+90-100 turn conversation forgets nearly every episodic memory before a
+369-689 turn LoCoMo conversation is even halfway done, regardless of how
+good extraction or retrieval are. Both `decay_lambda` and
+`relevance_weight` are exposed as overridable parameters with separate
+defaults for LoCoMo scale versus the pipeline's normal short-conversation
+defaults.
+
+Extraction runs one LLM call per turn, converting raw conversation text
+into typed fragments (fact, preference, person, event). The prompt took
+several real iterations to get right, swinging between over-extracting
+filler and under-extracting actual facts before settling. BUGS.md has
+that whole saga if you want to see how much trial and error went into
+what looks like one paragraph of instructions.
 
 ## Repo layout
 
@@ -123,16 +137,20 @@ kaggle_full_benchmark.ipynb    Weight-editing + Track 2 audio LoCoMo benchmarks
 
 ## Status
 
-- **Track 1 (text)**: validated on real LoCoMo data — 24.1% avg F1. Baseline
-  comparisons and further tuning ongoing.
-- **Track 2 (audio-to-audio + memory)**: real memory *conditioning*
-  confirmed on a live multi-turn run (a fact stated in turn 1 correctly
-  recalled in turn 3, via `HippoAudioPipeline` + Gemini's Live API) — a
-  full LoCoMo-scale benchmark is running now.
-- **Weight-editing baseline (ROME/MEMIT on GPT-2 XL)**: built, being
-  benchmarked now as an alternative to retrieval-based memory — see
-  `baselines/weight_edit_baseline.py`'s module docstring for why this is
-  expected to degrade at LoCoMo's scale, and why that's a legitimate
-  result rather than a failed benchmark.
+Track 1 (text) is validated on real LoCoMo data at 24.1% avg F1. Baseline
+comparisons and further tuning are ongoing.
 
-Everything above is backed by a real run cited in `BUGS.md`, not aspirational.
+Track 2 (audio-to-audio + memory) has a real, confirmed win: on a live
+multi-turn run through `HippoAudioPipeline` and Gemini's Live API, a fact
+stated in turn 1 got correctly recalled in turn 3. A full LoCoMo-scale
+benchmark for this track is running now, so there's no aggregate number
+yet, just the one confirmed case.
+
+The weight-editing baseline (ROME/MEMIT on GPT-2 XL) is built and being
+benchmarked as an alternative to retrieval-based memory. Worth reading
+`baselines/weight_edit_baseline.py`'s docstring before assuming it'll
+compete: it's expected to degrade at LoCoMo's scale, and that's a real
+result worth having, not a failure of the benchmark.
+
+Every number above traces back to an actual run logged in `BUGS.md`.
+Nothing here is projected or aspirational.
