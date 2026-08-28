@@ -235,6 +235,74 @@ def test_fact_and_event_route_to_correct_stores(tmp_path):
     assert pipe2.semantic_memory.count() == 0
 
 
+def test_ingest_text_turn_stores_without_calling_model(tmp_path):
+    """The store-only path benchmarks/locomo/evaluate_audio.py needs: a
+    conversation's history should populate memory/STM/turn count exactly
+    like process_turn's own storage steps, but never touch the audio
+    model at all -- no respond() call, so ingesting a 600-turn transcript
+    doesn't burn 600 unwanted spoken replies."""
+    model = MockAudioToAudioModel()
+    pipe = HippoAudioPipeline(audio_model=model, llm_client=_make_llm(memory_type="fact"))
+
+    pipe.ingest_text_turn("my dog's name is max")
+
+    assert model.calls == []  # never called respond()
+    assert (pipe.semantic_memory.count() + pipe.episodic_memory.count()) == 1
+    assert list(pipe.recent_turns) == ["my dog's name is max"]
+    assert pipe.current_turn == 1
+
+
+def test_process_turn_and_ingest_text_turn_agree_on_storage(tmp_path):
+    """Refactor safety net: process_turn now delegates its storage steps to
+    ingest_text_turn rather than duplicating them -- two pipelines fed the
+    same turn one via each path should end up with identical stored state."""
+    audio_in = str(tmp_path / "turn1.wav")
+    _make_silent_wav(audio_in)
+
+    model_a = MockAudioToAudioModel()
+    pipe_a = HippoAudioPipeline(audio_model=model_a, llm_client=_make_llm(memory_type="fact"))
+    pipe_a.process_turn(audio_in, "my dog's name is max")
+
+    model_b = MockAudioToAudioModel()
+    pipe_b = HippoAudioPipeline(audio_model=model_b, llm_client=_make_llm(memory_type="fact"))
+    pipe_b.ingest_text_turn("my dog's name is max")
+
+    assert list(pipe_a.recent_turns) == list(pipe_b.recent_turns)
+    assert pipe_a.current_turn == pipe_b.current_turn
+    assert (pipe_a.semantic_memory.count(), pipe_a.episodic_memory.count()) == \
+           (pipe_b.semantic_memory.count(), pipe_b.episodic_memory.count())
+
+
+def test_answer_question_reads_without_storing_or_advancing_state(tmp_path):
+    """The QA-only path benchmarks/locomo/evaluate_audio.py needs: asking a
+    held-out question should retrieve + condition generation like a normal
+    turn, but never store the question itself, never touch STM, and never
+    advance the turn counter -- mirrors run_locomo's text-pipeline QA step,
+    which calls retrieve()+generate() without also ingesting the question."""
+    fact_audio = str(tmp_path / "fact.wav")
+    question_audio = str(tmp_path / "question.wav")
+    _make_silent_wav(fact_audio)
+    _make_silent_wav(question_audio)
+
+    model = MockAudioToAudioModel()
+    pipe = HippoAudioPipeline(audio_model=model, llm_client=_make_llm(memory_type="fact"))
+
+    with _TtsPatch():
+        pipe.process_turn(fact_audio, "my dog's name is max")
+        turn_after_fact = pipe.current_turn
+        recent_after_fact = list(pipe.recent_turns)
+        memory_count_after_fact = pipe.semantic_memory.count() + pipe.episodic_memory.count()
+
+        response_audio, transcript = pipe.answer_question("what's my dog's name", question_audio)
+
+    assert "mock reply" in transcript
+    assert len(model.calls) == 2  # the fact turn's respond() call, plus this one
+    # No side effects from asking the question:
+    assert pipe.current_turn == turn_after_fact
+    assert list(pipe.recent_turns) == recent_after_fact
+    assert (pipe.semantic_memory.count() + pipe.episodic_memory.count()) == memory_count_after_fact
+
+
 def test_real_tts_produces_valid_context_audio(tmp_path):
     """The one test in this file that touches real pyttsx3 -- confirms the
     actual dependency wires up correctly end to end, exactly once, rather
