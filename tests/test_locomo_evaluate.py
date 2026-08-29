@@ -226,6 +226,55 @@ def test_system_name_requires_custom_pipeline_factory():
         run_locomo(llm_client=object(), system_name="not really custom")
 
 
+def test_max_turns_per_conversation_truncates_ingestion(monkeypatch):
+    """Confirmed as a real, necessary lever on a real run: an API-backed
+    llm_client can hit the provider's own quota partway through ingesting
+    one long conversation, since each turn is a separate real request with
+    no way to combine turns into fewer calls. This caps how many turns
+    actually get ingested, truncating from the start (not sampling)."""
+    import benchmarks.locomo.evaluate as evaluate_mod
+
+    fake_conv = {
+        "conversation": {
+            "session_1_date_time": "1 May, 2023",
+            "session_1": [
+                {"dia_id": "D1:1", "speaker": "Alex", "text": "Turn one."},
+                {"dia_id": "D1:2", "speaker": "Alex", "text": "Turn two."},
+                {"dia_id": "D1:3", "speaker": "Alex", "text": "Turn three."},
+            ],
+        },
+        "qa": [{"question": "irrelevant?", "answer": "irrelevant", "category": 2}],
+    }
+    monkeypatch.setattr(evaluate_mod, "load_locomo", lambda data_path=None: [fake_conv])
+
+    ingested = []
+
+    class FakePipeline:
+        def __init__(self, llm):
+            self.llm = llm
+
+        def ingest_text_turn(self, text):
+            ingested.append(text)
+
+        def retrieve(self, query, top_k=5):
+            return []
+
+    llm = _make_extraction_llm()
+    llm.generate.side_effect = None
+    llm.generate.return_value = "irrelevant"
+
+    evaluate_mod.run_locomo(
+        llm_client=llm,
+        num_conversations=1,
+        max_turns_per_conversation=2,
+        pipeline_factory=lambda llm_client: FakePipeline(llm_client),
+        system_name="FakeSystem",
+        verbose=False,
+    )
+
+    assert ingested == ["[1 May, 2023] Alex: Turn one.", "[1 May, 2023] Alex: Turn two."]
+
+
 def test_custom_pipeline_factory_never_imports_hippovoicepipeline(monkeypatch):
     """Confirmed as a real crash on Kaggle: run_locomo used to unconditionally
     `from pipeline import HippoVoicePipeline` at the top of the function --

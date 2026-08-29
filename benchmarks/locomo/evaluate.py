@@ -174,6 +174,7 @@ def run_locomo(
     llm_client=None,
     num_conversations: int = 10,
     max_qa_per_conversation: int | None = None,
+    max_turns_per_conversation: int | None = None,
     include_adversarial: bool = False,
     data_path: str | None = None,
     checkpoint_path: str | None = None,
@@ -222,6 +223,19 @@ def run_locomo(
     `max_qa_per_conversation` caps QA pairs per conversation -- useful for a
     cheap smoke test (a full run is ~150-250 QA pairs x 10 conversations,
     each needing an LLM call, which is slow on a single T4).
+
+    `max_turns_per_conversation` caps how many flattened turns get ingested
+    (truncates from the start of the conversation, not sampled) -- added
+    after a real run confirmed an API-backed llm_client can hit the free
+    tier's daily/per-minute quota partway through a single 369-689 turn
+    conversation's ingestion, since each turn is one extraction call with
+    no way to combine multiple turns into one request (unlike a local
+    model, where ingest_text_turns_batch's "batching" is a single GPU
+    forward pass over many turns; an API call has no equivalent -- each
+    turn still costs one real request against the provider's quota
+    regardless of how the calls are grouped in Python). None (default)
+    ingests the whole conversation, unchanged from before this parameter
+    existed.
 
     `checkpoint_path`, if given, saves progress to that JSON file after each
     conversation and resumes from it if the file already exists. Every turn
@@ -308,6 +322,7 @@ def run_locomo(
         "backend": getattr(pipeline.llm, "_backend", None),
         "num_conversations": num_conversations,
         "max_qa_per_conversation": max_qa_per_conversation,
+        "max_turns_per_conversation": max_turns_per_conversation,
         "include_adversarial": include_adversarial,
         "decay_lambda": decay_lambda,
         "relevance_weight": relevance_weight,
@@ -348,6 +363,8 @@ def run_locomo(
         conv_pipeline = pipeline_factory(pipeline.llm)
 
         turns = _flatten_conversation(conv["conversation"])
+        if max_turns_per_conversation:
+            turns = turns[:max_turns_per_conversation]
         if verbose:
             print(f"Conversation {i + 1}/{len(conversations)}: ingesting {len(turns)} turns...")
         ingest_start = time.perf_counter()

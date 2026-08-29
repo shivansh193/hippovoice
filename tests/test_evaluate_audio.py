@@ -93,6 +93,36 @@ def test_ingests_turns_as_text_without_calling_audio_model(monkeypatch):
     assert model.calls == []  # no QA pairs -> zero respond() calls anywhere
 
 
+def test_max_turns_per_conversation_truncates_ingestion(monkeypatch):
+    """Same lever as run_locomo's own max_turns_per_conversation, same real
+    reason: an API-backed llm_client can hit the provider's quota partway
+    through ingesting one long conversation, since ingestion is one
+    extraction call per turn with no way to combine turns into fewer calls."""
+    conv = _fake_conv()
+    conv["qa"] = []  # isolate to ingestion only, mirrors the test above
+    monkeypatch.setattr(evaluate_audio_mod, "load_locomo", lambda data_path=None: [conv])
+
+    ingested_calls = []
+    llm = _make_extraction_llm()
+    orig_generate = llm.generate
+    def _spy(system, messages, max_tokens=512):
+        if "extract" in system.lower() or "memory" in system.lower():
+            ingested_calls.append(messages[-1]["content"])
+        return orig_generate(system=system, messages=messages, max_tokens=max_tokens)
+    llm.generate = MagicMock(side_effect=_spy)
+
+    model = MockAudioToAudioModel()
+    with _TtsPatch():
+        evaluate_audio_mod.run_locomo_audio(
+            llm_client=llm, audio_model=model,
+            num_conversations=1, max_qa_per_conversation=5,
+            max_turns_per_conversation=1, verbose=False,
+        )
+
+    # _fake_conv() has 2 turns -- capped to 1 means only 1 extraction call.
+    assert len(ingested_calls) == 1
+
+
 def test_qa_step_calls_audio_model_and_scores_transcript(monkeypatch):
     """The actual point of this harness: a QA question gets synthesized,
     sent through the audio model, and the returned transcript gets scored

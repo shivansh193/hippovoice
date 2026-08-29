@@ -79,6 +79,7 @@ def run_locomo_audio(
     audio_model,
     num_conversations: int = 1,
     max_qa_per_conversation: int | None = 10,
+    max_turns_per_conversation: int | None = None,
     include_adversarial: bool = False,
     data_path: str | None = None,
     checkpoint_path: str | None = None,
@@ -105,6 +106,14 @@ def run_locomo_audio(
     own short-conversation defaults would forget almost everything before
     a 369-663 turn conversation ends).
 
+    max_turns_per_conversation caps how many flattened turns get ingested
+    (truncates from the start) -- same reasoning as run_locomo's own
+    parameter of the same name: confirmed on a real run that an API-backed
+    llm_client can hit the provider's daily/per-minute quota partway
+    through a single long conversation's ingestion, since ingestion here
+    is one extraction call per turn with no way to combine turns into
+    fewer requests. None (default) ingests the whole conversation.
+
     Returns the same shape as run_locomo: {"avg_f1", "total", "total_f1",
     "bins", "details"} -- a drop-in match for comparing against any other
     system's result dict from this project.
@@ -117,6 +126,7 @@ def run_locomo_audio(
         "audio_model": getattr(audio_model, "model", type(audio_model).__name__),
         "num_conversations": num_conversations,
         "max_qa_per_conversation": max_qa_per_conversation,
+        "max_turns_per_conversation": max_turns_per_conversation,
         "include_adversarial": include_adversarial,
         "decay_lambda": decay_lambda,
         "relevance_weight": relevance_weight,
@@ -168,6 +178,8 @@ def run_locomo_audio(
         )
 
         turns = _flatten_conversation(conv["conversation"])
+        if max_turns_per_conversation:
+            turns = turns[:max_turns_per_conversation]
         if verbose:
             print(f"Conversation {i + 1}/{len(conversations)}: ingesting {len(turns)} turns (text-only)...")
         ingest_start = time.perf_counter()
