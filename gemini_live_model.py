@@ -52,13 +52,28 @@ GEMINI_OUTPUT_SAMPLE_RATE = 24000
 
 
 class GeminiLiveAudioModel(AudioToAudioModel):
-    def __init__(self, api_key: str | None = None, model: str = "gemini-2.5-flash-native-audio-latest"):
+    def __init__(self, api_key: str | None = None, model: str = "gemini-2.5-flash-native-audio-latest",
+                 system_instruction: str | None = None):
         # api_key=None lets the underlying SDK fall back to the
         # GEMINI_API_KEY / GOOGLE_API_KEY env var -- avoids ever needing the
         # key to exist as a literal string in code that might get committed.
         self._api_key = api_key
         self.model = model
         self._client = None
+        # None by default -- a live conversational demo wants the model's
+        # normal, natural spoken style. Confirmed as a real, fixable scoring
+        # problem specifically for LoCoMo-style QA: without this, real
+        # answers came back substantively correct but wrapped in a full
+        # sentence ("Caroline went to the lgbtq support group on may 7th,
+        # 2023." vs gold "7 may 2023"), and LoCoMo's strict token-F1 scorer
+        # penalizes that verbosity even when the content is right -- same
+        # class of issue Track 1's own QA system prompt ("Give a specific,
+        # direct answer... Be concise") already exists to prevent.
+        # LiveConnectConfig.system_instruction (confirmed present in the
+        # SDK's own config schema) lets a caller opt into that same
+        # discipline here, e.g. evaluate_audio.py's benchmark run, without
+        # changing behavior for anything that doesn't set it.
+        self.system_instruction = system_instruction
 
     def load(self):
         from google import genai
@@ -120,6 +135,7 @@ class GeminiLiveAudioModel(AudioToAudioModel):
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(disabled=True),
             ),
+            **({"system_instruction": self.system_instruction} if self.system_instruction else {}),
         )
 
         audio_chunks = []
