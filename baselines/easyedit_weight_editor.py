@@ -85,6 +85,28 @@ class EasyEditWeightEditor:
         hparams.model_name = "gpt2-xl"
         self.editor = BaseEditor.from_hparams(hparams)
 
+        # Confirmed as a real OOM on a Kaggle T4 (14MB short of the card's
+        # ~14.5GB, right at the edit itself) and confirmed from EasyEdit's
+        # own compute_v.py source: ROME's edit step runs ONE forward+backward
+        # pass through all 48 layers, but batches ~15-20 reworded versions of
+        # the same sentence together in that single pass (context_templates,
+        # used so the edit generalizes across phrasings) -- that's what
+        # actually blows the memory budget, not the ~6GB of plain weights.
+        # A forward+backward pass needs to keep every layer's intermediate
+        # activations in memory so backward can use them; with ~16 sentences
+        # batched through 48 layers, that adds up fast.
+        # gradient_checkpointing_enable() is the standard, EXACT fix for
+        # this specific shape of problem: instead of storing every layer's
+        # activations, it throws most of them away during forward and
+        # recomputes them on demand during backward. Same math, same
+        # result, just trading some extra compute time for a lot less
+        # memory -- unlike a precision change (fp16), there's no numerical
+        # risk to validate here. EasyEdit's compute_v.py never enables this
+        # itself; it just calls forward on whatever model object it's
+        # handed, so turning it on here (our own wrapper) is enough --
+        # no EasyEdit code needs touching.
+        self.editor.model.gradient_checkpointing_enable()
+
         # Full CPU snapshot of pristine weights, taken once right after
         # load. reset() reloads this rather than relying on EasyEdit's own
         # per-edit weights_copy/restore path, because that mechanism only
