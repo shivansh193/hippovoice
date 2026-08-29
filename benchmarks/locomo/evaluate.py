@@ -407,8 +407,22 @@ def run_locomo(
             if not question or not gold_answer:
                 continue
 
-            retrieved = conv_pipeline.retrieve(question, top_k=5)
-            context = build_qa_context(retrieved)
+            if hasattr(conv_pipeline, "retrieve"):
+                retrieved = conv_pipeline.retrieve(question, top_k=5)
+                context = build_qa_context(retrieved)
+            else:
+                # Confirmed as a real crash on a live run: WeightEditBaseline
+                # has no .retrieve() by design -- the edited model's own
+                # weights ARE the memory, so there's no separate retrieval
+                # step feeding context into generation (see its module
+                # docstring). This QA loop assumed every system implements
+                # .retrieve() until a real run actually reached this line
+                # for the first time (every earlier attempt failed during
+                # ingestion before ever getting here). No context to inject;
+                # the whole point of that baseline is testing whether the
+                # edited model answers correctly from zero retrieved context.
+                retrieved = []
+                context = ""
 
             predicted = conv_pipeline.llm.generate(
                 system=(

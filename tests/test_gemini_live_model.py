@@ -8,6 +8,7 @@ tested unconditionally, no network involved.
 """
 
 import asyncio
+from unittest.mock import MagicMock
 
 import numpy as np
 import soundfile as sf
@@ -47,6 +48,88 @@ def test_write_pcm16_wav_roundtrips(tmp_path):
     data, sr = sf.read(out, dtype="int16")
     assert sr == GEMINI_OUTPUT_SAMPLE_RATE
     assert len(data) == len(arr)
+
+
+def test_respond_passes_system_instruction_when_configured(tmp_path):
+    """Confirmed as a real, fixable scoring problem: without a system
+    instruction, real LoCoMo QA answers came back substantively correct but
+    wrapped in a full sentence, and the strict token-F1 scorer penalized
+    that verbosity even when the content was right. system_instruction is
+    None by default (a live conversational demo wants natural speech) --
+    this confirms it actually reaches LiveConnectConfig when a caller
+    (e.g. a benchmark run) sets one, without a real network call."""
+    from google.genai import types
+
+    input_path = str(tmp_path / "in.wav")
+    samples = np.zeros(16000, dtype=np.int16)
+    sf.write(input_path, samples, 16000)
+
+    model = GeminiLiveAudioModel(system_instruction="Be concise.")
+    model._client = MagicMock()
+    captured = {}
+
+    class FakeSession:
+        async def send_realtime_input(self, **kwargs):
+            pass
+
+        async def receive(self):
+            return
+            yield  # pragma: no cover -- makes this an async generator function
+
+    class FakeConnectCM:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def fake_connect(model, config):
+        captured["config"] = config
+        return FakeConnectCM()
+
+    model._client.aio.live.connect = fake_connect
+
+    model.respond(input_path)
+
+    assert isinstance(captured["config"], types.LiveConnectConfig)
+    assert captured["config"].system_instruction == "Be concise."
+
+
+def test_respond_omits_system_instruction_by_default(tmp_path):
+    """The default (None) must not appear in the config at all -- a live
+    conversational demo shouldn't get an unsolicited instruction just
+    because the field exists on LiveConnectConfig."""
+    input_path = str(tmp_path / "in.wav")
+    sf.write(input_path, np.zeros(16000, dtype=np.int16), 16000)
+
+    model = GeminiLiveAudioModel()  # system_instruction defaults to None
+    model._client = MagicMock()
+    captured = {}
+
+    class FakeSession:
+        async def send_realtime_input(self, **kwargs):
+            pass
+
+        async def receive(self):
+            return
+            yield  # pragma: no cover
+
+    class FakeConnectCM:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def fake_connect(model, config):
+        captured["config"] = config
+        return FakeConnectCM()
+
+    model._client.aio.live.connect = fake_connect
+
+    model.respond(input_path)
+
+    assert captured["config"].system_instruction is None
 
 
 def test_respond_works_when_called_from_a_running_event_loop(tmp_path):

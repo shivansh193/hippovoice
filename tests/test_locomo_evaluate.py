@@ -226,6 +226,48 @@ def test_system_name_requires_custom_pipeline_factory():
         run_locomo(llm_client=object(), system_name="not really custom")
 
 
+def test_qa_works_for_a_pipeline_with_no_retrieve_method(monkeypatch):
+    """Confirmed as a real crash on a live run: WeightEditBaseline has no
+    .retrieve() by design (the edited model's own weights ARE the memory --
+    see its module docstring), but run_locomo's QA loop unconditionally
+    called conv_pipeline.retrieve(...) for every system. Never caught
+    before because every earlier real run failed during ingestion, long
+    before ever reaching the QA loop for a pipeline like this."""
+    import benchmarks.locomo.evaluate as evaluate_mod
+
+    fake_conv = {
+        "conversation": {
+            "session_1_date_time": "1 May, 2023",
+            "session_1": [{"dia_id": "D1:1", "speaker": "Alex", "text": "I got a new job."}],
+        },
+        "qa": [{"question": "What did Alex get?", "answer": "a new job", "category": 2}],
+    }
+    monkeypatch.setattr(evaluate_mod, "load_locomo", lambda data_path=None: [fake_conv])
+
+    class FakePipelineWithNoRetrieve:
+        """Deliberately has no .retrieve() -- mirrors WeightEditBaseline."""
+        def __init__(self, llm):
+            self.llm = llm
+
+        def ingest_text_turn(self, text):
+            pass
+
+    llm = _make_extraction_llm()
+    llm.generate.side_effect = None
+    llm.generate.return_value = "a new job"
+
+    result = evaluate_mod.run_locomo(
+        llm_client=llm,
+        num_conversations=1,
+        pipeline_factory=lambda llm_client: FakePipelineWithNoRetrieve(llm_client),
+        system_name="FakeSystem",
+        verbose=False,
+    )
+
+    assert result["total"] == 1
+    assert result["details"][0]["retrieved_ids"] == []
+
+
 def test_max_turns_per_conversation_truncates_ingestion(monkeypatch):
     """Confirmed as a real, necessary lever on a real run: an API-backed
     llm_client can hit the provider's own quota partway through ingesting
