@@ -342,18 +342,17 @@ class HippoAudioPipeline:
             ))
         summary = ". ".join(parts)
 
-        # Confirmed for real on a live multi-turn run (not just suspected):
-        # reusing one pyttsx3 engine instance across repeated synthesize()
-        # calls reliably deadlocks its SAPI5 COM loop on Windows. Turn 1
-        # never needs this method (nothing to inject yet), so a cached
-        # engine's *first* real use always looks fine in a quick smoke
-        # test -- the deadlock only shows up on the second synthesis call
-        # in the same process, i.e. turn 3+ of a real conversation, which
-        # is exactly the multi-turn case this whole method exists for. Real
-        # usage therefore builds a fresh engine every call; self._tts stays
-        # purely a test-injection seam (existing tests mock this out
-        # entirely, so they never exercise the reuse path this comment
-        # warns about).
+        # Originally documented here as "reusing one pyttsx3 engine
+        # instance across repeated synthesize() calls deadlocks SAPI5's
+        # COM loop" -- confirmed real, but incomplete: a later isolated
+        # test showed even a SECOND freshly-constructed engine (no reuse
+        # at all) hangs just as reliably. The actual fix lives in
+        # tts/model.py (load_tts() returns a lightweight handle, no real
+        # pyttsx3.init() here) and tts/synthesize.py (the real init +
+        # speak/save now happens in a subprocess, isolated per call) --
+        # building a fresh handle every call here is no longer a fragile
+        # workaround, just the normal, cheap path. self._tts remains a
+        # test-injection seam (existing tests mock this out entirely).
         if self._tts is not None:
             engine = self._tts
         else:
