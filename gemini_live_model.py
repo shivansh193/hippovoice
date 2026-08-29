@@ -75,7 +75,28 @@ class GeminiLiveAudioModel(AudioToAudioModel):
         """
         if self._client is None:
             self.load()
-        return asyncio.run(self._respond_async(audio_path))
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop running in this thread -- the common case for a plain
+            # script (confirmed working this way in this project's own
+            # earlier standalone test scripts). asyncio.run() is the
+            # standard way to drive the coroutine here.
+            return asyncio.run(self._respond_async(audio_path))
+
+        # A loop IS already running in this thread. Confirmed for real on
+        # Kaggle: Jupyter/IPython kernels run their own asyncio event loop
+        # by default, and asyncio.run() refuses to nest inside one --
+        # `RuntimeError: asyncio.run() cannot be called from a running
+        # event loop`. Running the coroutine on a dedicated thread with its
+        # own fresh loop sidesteps the nesting restriction entirely,
+        # without a third-party monkey-patch (nest_asyncio) or adding a
+        # new dependency to install.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, self._respond_async(audio_path))
+            return future.result()
 
     async def _respond_async(self, audio_path: str) -> tuple[str, str]:
         from google.genai import types

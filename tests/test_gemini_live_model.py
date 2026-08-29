@@ -7,6 +7,8 @@ format helpers (_read_as_pcm16 / _write_pcm16_wav) are plain logic and get
 tested unconditionally, no network involved.
 """
 
+import asyncio
+
 import numpy as np
 import soundfile as sf
 import pytest
@@ -45,6 +47,41 @@ def test_write_pcm16_wav_roundtrips(tmp_path):
     data, sr = sf.read(out, dtype="int16")
     assert sr == GEMINI_OUTPUT_SAMPLE_RATE
     assert len(data) == len(arr)
+
+
+def test_respond_works_when_called_from_a_running_event_loop(tmp_path):
+    """
+    Regression test for a real, confirmed bug: Jupyter/IPython kernels
+    (including Kaggle's) run their own asyncio event loop by default, and
+    respond() used to call asyncio.run() unconditionally -- which raises
+    `RuntimeError: asyncio.run() cannot be called from a running event
+    loop` the moment respond() is invoked from inside a notebook cell.
+    This never showed up in earlier standalone-script testing because a
+    plain script has no event loop already running.
+
+    Simulates that exact situation without needing a real notebook kernel:
+    calls model.respond() (a sync method) from inside an async function
+    that's itself being driven by asyncio.run(), so a loop is genuinely
+    running in this thread when respond() checks for one.
+    """
+    model = GeminiLiveAudioModel()
+    model._client = object()  # respond() only checks `is None`, load() never called
+
+    async def fake_respond_async(audio_path):
+        return ("fake_response.wav", "fake transcript")
+
+    model._respond_async = fake_respond_async
+
+    async def call_respond_from_inside_a_loop():
+        # Proves a loop is genuinely running in this thread at the moment
+        # respond() is called, not just plausible -- this would raise if false.
+        asyncio.get_running_loop()
+        return model.respond("dummy_input.wav")
+
+    response_path, transcript = asyncio.run(call_respond_from_inside_a_loop())
+
+    assert response_path == "fake_response.wav"
+    assert transcript == "fake transcript"
 
 
 @pytest.mark.live_api
