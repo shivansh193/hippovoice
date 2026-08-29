@@ -95,6 +95,51 @@ def test_respond_passes_system_instruction_when_configured(tmp_path):
     assert captured["config"].system_instruction == "Be concise."
 
 
+def test_respond_raises_timeout_error_instead_of_hanging_forever(tmp_path, monkeypatch):
+    """
+    Regression test for a real, confirmed hang: a live diagnostic run's
+    WebSocket connection to Gemini got closed server-side (both TCP sockets
+    sat in CLOSE_WAIT) while _respond_async was still awaiting
+    session.receive()'s next message -- which of course never came. The
+    `async for` loop had no self-imposed deadline, so the call blocked
+    forever with no exception raised; the only way to notice was inspecting
+    OS-level socket state, which took 20+ minutes of real wall-clock time to
+    even suspect. This simulates that exact situation: a fake session whose
+    receive() yields nothing and never completes, wrapped in a short
+    timeout so the test itself doesn't hang.
+    """
+    monkeypatch.setattr("gemini_live_model.RESPONSE_TIMEOUT_SECONDS", 0.05)
+
+    input_path = str(tmp_path / "in.wav")
+    sf.write(input_path, np.zeros(16000, dtype=np.int16), 16000)
+
+    model = GeminiLiveAudioModel()
+    model._client = MagicMock()
+
+    class HangingSession:
+        async def send_realtime_input(self, **kwargs):
+            pass
+
+        async def receive(self):
+            # A real async generator that never yields and never returns --
+            # exactly what an `async for` sees on a connection the server
+            # already closed without a clean turn_complete.
+            await asyncio.Event().wait()
+            yield  # pragma: no cover -- unreachable, makes this a generator
+
+    class FakeConnectCM:
+        async def __aenter__(self):
+            return HangingSession()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    model._client.aio.live.connect = lambda model, config: FakeConnectCM()
+
+    with pytest.raises(TimeoutError):
+        model.respond(input_path)
+
+
 def test_respond_omits_system_instruction_by_default(tmp_path):
     """The default (None) must not appear in the config at all -- a live
     conversational demo shouldn't get an unsolicited instruction just
