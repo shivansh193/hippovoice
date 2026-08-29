@@ -95,17 +95,41 @@ class EasyEditWeightEditor:
         # A forward+backward pass needs to keep every layer's intermediate
         # activations in memory so backward can use them; with ~16 sentences
         # batched through 48 layers, that adds up fast.
-        # gradient_checkpointing_enable() is the standard, EXACT fix for
-        # this specific shape of problem: instead of storing every layer's
+        # gradient_checkpointing_enable() is the standard fix for this
+        # specific shape of problem: instead of storing every layer's
         # activations, it throws most of them away during forward and
         # recomputes them on demand during backward. Same math, same
-        # result, just trading some extra compute time for a lot less
-        # memory -- unlike a precision change (fp16), there's no numerical
-        # risk to validate here. EasyEdit's compute_v.py never enables this
-        # itself; it just calls forward on whatever model object it's
-        # handed, so turning it on here (our own wrapper) is enough --
-        # no EasyEdit code needs touching.
+        # result -- IF nothing else in the model behaves differently
+        # between the two passes. EasyEdit's compute_v.py never enables
+        # this itself; it just calls forward on whatever model object it's
+        # handed, so turning it on here (our own wrapper) is enough -- no
+        # EasyEdit code needs touching.
         self.editor.model.gradient_checkpointing_enable()
+
+        # Confirmed as a real, silent correctness bug, not a guess:
+        # HuggingFace gates checkpointing with
+        # `if self.gradient_checkpointing and self.training`, so making it
+        # actually engage requires calling model.train() during the edit
+        # (see edit() below) -- but GPT-2 XL has real dropout (~10%) on
+        # attention/residuals/embeddings, and train() mode turns that back
+        # on. A live Kaggle run showed exactly the failure this risks: the
+        # OOM was gone, but "AFTER edit" came back byte-identical to
+        # "BEFORE edit" -- the edit silently computed to ~nothing, because
+        # ROME's correction vector depends on precise activations, and
+        # dropout noise during that computation corrupted it. This is
+        # worse than a crash: it "succeeds" with a wrong answer, exactly
+        # the failure mode the sanity check two cells down exists to catch
+        # (and did catch, here). Zeroing every Dropout module's p makes
+        # dropout a true no-op in either train() or eval() mode, so
+        # train()-for-checkpointing during edit() is safe: forward is
+        # numerically identical to eval() mode, just recomputed instead of
+        # stored during backward. GPT-2 has no BatchNorm (only LayerNorm,
+        # which has no train/eval distinction), so this is the only
+        # train()-vs-eval() behavioral difference that mattered here.
+        import torch
+        for module in self.editor.model.modules():
+            if isinstance(module, torch.nn.Dropout):
+                module.p = 0.0
 
         # Full CPU snapshot of pristine weights, taken once right after
         # load. reset() reloads this rather than relying on EasyEdit's own
@@ -132,10 +156,15 @@ class EasyEditWeightEditor:
         # transformer blocks gate checkpointing with
         # `if self.gradient_checkpointing and self.training`, and
         # BaseEditor.from_hparams() leaves the model in eval() mode.
-        # Checkpointing was enabled but never actually engaging. Wrapped in
-        # try/finally so eval() mode -- needed for correct, deterministic
-        # generate() calls (dropout stays off) -- is restored even if the
-        # edit itself raises.
+        # Checkpointing was enabled but never actually engaging. Safe to
+        # flip to train() here specifically because load() already zeroed
+        # every Dropout module's p -- otherwise this exact switch silently
+        # broke the edit itself on the very next real run (see load()'s
+        # comment: "AFTER edit" came back identical to "BEFORE edit").
+        # Wrapped in try/finally so eval() mode is restored even if the
+        # edit raises -- generate() also defensively re-forces it below,
+        # since generation should never run under an unexpected mode
+        # regardless of how it got there.
         self.editor.model.train()
         try:
             self.editor.edit(
