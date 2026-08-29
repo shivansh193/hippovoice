@@ -124,17 +124,34 @@ class EasyEditWeightEditor:
         # benchmark, see weight_edit_baseline.py's module docstring), not
         # get quietly undone. reset() is the only place weights should
         # actually roll back.
-        self.editor.edit(
-            prompts=[prompt],
-            target_new=[target_new],
-            subject=[subject],
-            keep_original_weight=False,
-            verbose=False,
-        )
+        #
+        # model.train() here is confirmed necessary, not decorative: a real
+        # Kaggle run showed load()'s gradient_checkpointing_enable() call
+        # barely reduced peak memory (a T4 OOM's "free" memory only moved
+        # from 6.8MB to 10.8MB, still short) -- because HuggingFace's own
+        # transformer blocks gate checkpointing with
+        # `if self.gradient_checkpointing and self.training`, and
+        # BaseEditor.from_hparams() leaves the model in eval() mode.
+        # Checkpointing was enabled but never actually engaging. Wrapped in
+        # try/finally so eval() mode -- needed for correct, deterministic
+        # generate() calls (dropout stays off) -- is restored even if the
+        # edit itself raises.
+        self.editor.model.train()
+        try:
+            self.editor.edit(
+                prompts=[prompt],
+                target_new=[target_new],
+                subject=[subject],
+                keep_original_weight=False,
+                verbose=False,
+            )
+        finally:
+            self.editor.model.eval()
 
     def generate(self, prompt: str, max_tokens: int = 50) -> str:
         tok = self.editor.tok
         model = self.editor.model
+        model.eval()  # defensive -- generation must never see train()-mode dropout
         inputs = tok(prompt, return_tensors="pt").to(model.device)
         output_ids = model.generate(
             **inputs,
