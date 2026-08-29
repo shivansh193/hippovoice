@@ -14,9 +14,10 @@ Structurally different from run_locomo in exactly one place, forced by the
 audio-to-audio interface itself: a benchmark question has to actually be
 spoken to the model, not just handed to conv_pipeline.llm.generate() as a
 text string. So the QA step here synthesizes each question to speech
-(fresh pyttsx3 engine per call -- see pipeline_audio2audio.py's own
-comment on why engine reuse deadlocks pyttsx3's SAPI5 loop on Windows,
-confirmed for real during this project's live multi-turn demo) and calls
+(via tts.synthesize.synthesize(), which isolates the real pyttsx3 call in
+a subprocess per invocation -- see tts/model.py and tts/synthesize.py for
+why a plain fresh-engine-per-call in-process was confirmed insufficient
+on Windows) and calls
 conv_pipeline.answer_question(), the read-only audio-QA path added to
 HippoAudioPipeline specifically for this benchmark (see its docstring).
 
@@ -60,10 +61,10 @@ from benchmarks.locomo.evaluate import (
 
 def _synthesize_question_audio(text: str) -> str:
     """
-    Fresh pyttsx3 engine per call, matching pipeline_audio2audio.py's own
-    fix for the confirmed SAPI5 COM reuse deadlock -- this function gets
-    called once per QA pair, i.e. repeatedly within one process, exactly
-    the failure condition that bug needs.
+    Called once per QA pair, i.e. repeatedly within one process --
+    exactly the condition that used to deadlock pyttsx3's SAPI5 COM loop
+    on Windows before tts/model.py + tts/synthesize.py moved the real
+    engine lifecycle into a subprocess per call.
     """
     from tts.model import load_tts
     from tts.synthesize import synthesize

@@ -823,6 +823,55 @@ Add to this list; don't fix silently in passing.
   fully captured (aggregate + full per-question breakdown) from the run's
   log output.
 
+## Fixed (continued)
+
+- **The earlier pyttsx3 SAPI5 fix ("fresh `load_tts()` engine per call")
+  was incomplete — it wasn't a reuse bug, it was a per-process bug.**
+  Surfaced while diagnosing why a local HippoAudio LoCoMo run
+  (`benchmarks/locomo/evaluate_audio.py`) sat at ~2.5 min/question and
+  occasionally hung outright with no exception. Killed the hung process
+  and inspected it at the OS level: near-zero CPU growth over 20+ minutes,
+  both TCP sockets to Google in `CLOSE_WAIT` — looked at first like a
+  dropped Gemini Live connection (see the `GeminiLiveAudioModel` timeout
+  fix above), but adding flushed per-step timing to the diagnostic showed
+  the hang was actually in `_build_context_audio`, a purely local step
+  with no network involved. Isolated it completely with a standalone
+  script — zero pipeline code, just `load_tts()` called twice in a row —
+  and the *second* call hung indefinitely. Two fresh, separate engine
+  objects, no reuse of either one, and it still deadlocked: proof that
+  `tts/model.py`'s old `load_tts()` (which called `pyttsx3.init()`
+  directly) was itself the trigger every call site was hitting on its
+  second-or-later call per process, not just `tts/synthesize.py`'s
+  `synthesize()` as the earlier fix assumed. This also means the earlier
+  "confirmed fixed" verification only worked because that test run never
+  happened to call `load_tts()` a second time in the same process.
+
+  Real fix: `tts/model.py`'s `load_tts()` no longer touches `pyttsx3` at
+  all — it returns a lightweight `TTSHandle` carrying rate/volume only.
+  The actual `pyttsx3.init()` → configure → `save_to_file`/`say` →
+  `runAndWait()` sequence now runs inside a fresh OS subprocess
+  (`tts/_synthesize_worker.py`), spawned once per `synthesize()`/`speak()`
+  call by `tts/synthesize.py`. A new process always gets a new COM
+  apartment, so it no longer matters how many times TTS has already run
+  in the parent process. Also added a `SYNTHESIZE_TIMEOUT_SECONDS=30`
+  guard around the subprocess call, same discipline as the
+  `GeminiLiveAudioModel` fix, in case a *different* SAPI5 issue ever hangs
+  the worker itself.
+
+  Verified with a direct regression test (`tests/test_tts.py::
+  test_synthesize_can_be_called_repeatedly_without_hanging`) that calls
+  the real subprocess-isolated path three times in one process — the
+  exact shape that hung before this fix — plus the full existing suite
+  (`tests/test_pipeline_audio2audio.py`, `tests/test_evaluate_audio.py`,
+  `tests/test_pipeline.py`), all passing unchanged since every existing
+  test mocks `tts.model.load_tts`/`tts.synthesize.synthesize` at the
+  function boundary this fix preserves. This also retroactively explains
+  why the one real local HippoAudio LoCoMo run that did complete (60
+  turns, 15 QA, avg F1 28.2%) averaged ~130s/question — almost certainly
+  mostly SAPI5 COM contention occasionally resolving itself rather than
+  real per-question cost, meaning that number's wall-clock time, not its
+  F1 score, was the misleading part.
+
 ## Open — carried over from earlier session (context.md)
 
 - Header table in `colab.ipynb` says Qwen3-4B, but the "Load LLM" cell
