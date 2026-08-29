@@ -120,6 +120,32 @@ class GeminiLiveAudioModel(AudioToAudioModel):
             return future.result()
 
     async def _respond_async(self, audio_path: str) -> tuple[str, str]:
+        # Wraps the ENTIRE operation (connect, send, receive, and the
+        # session's own close/cleanup on exiting the `async with` below) in
+        # one timeout, not just the receive loop. Confirmed necessary the
+        # hard way: an earlier version of this fix only wrapped the receive
+        # loop, and a second real hang still occurred with the identical
+        # CLOSE_WAIT/near-zero-CPU signature as the first -- meaning the
+        # hang wasn't always in receive() itself; it can just as easily be
+        # in connect()'s handshake or in __aexit__'s close sequence trying
+        # to gracefully shut down a connection the server already tore down
+        # unilaterally. asyncio.wait_for cancels whatever's still pending
+        # inside the coroutine on timeout, wherever that turns out to be.
+        try:
+            return await asyncio.wait_for(
+                self._respond_impl(audio_path), timeout=RESPONSE_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Gemini Live API call did not complete within "
+                f"{RESPONSE_TIMEOUT_SECONDS}s -- the connection likely "
+                f"dropped or hung server-side without a clean close "
+                f"(confirmed case: sockets left sitting in CLOSE_WAIT with "
+                f"near-zero CPU use). Caller should retry with a fresh "
+                f"connection, not assume no answer exists."
+            )
+
+    async def _respond_impl(self, audio_path: str) -> tuple[str, str]:
         from google.genai import types
 
         pcm_bytes = _read_as_pcm16(audio_path, GEMINI_INPUT_SAMPLE_RATE)
@@ -148,23 +174,17 @@ class GeminiLiveAudioModel(AudioToAudioModel):
         input_transcript = ""
         output_transcript = ""
 
-        # Confirmed as a real, live hang, not a guess: a diagnostic run's
-        # WebSocket connection to Gemini was silently closed by the server
-        # (both TCP sockets sat in CLOSE_WAIT -- the remote side had already
-        # hung up) while this loop was still awaiting session.receive()'s
-        # next message, which of course never came. `async for` over a
-        # dead-but-not-yet-raising connection has no self-imposed deadline,
-        # so the whole call -- and anything driving it, like a benchmark
-        # run -- blocked forever with no error and no way to notice short of
-        # inspecting OS-level socket state. RESPONSE_TIMEOUT_SECONDS bounds
-        # each individual message wait; a real turn_complete well within a
-        # few seconds is the normal case, so this is generous, not tight.
-        async def _drain():
+        async with self._client.aio.live.connect(model=self.model, config=config) as session:
+            await session.send_realtime_input(activity_start=types.ActivityStart())
+            await session.send_realtime_input(
+                audio=types.Blob(data=pcm_bytes, mime_type=f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}")
+            )
+            await session.send_realtime_input(activity_end=types.ActivityEnd())
+
             async for message in session.receive():
                 sc = message.server_content
                 if sc is None:
                     continue
-                nonlocal input_transcript, output_transcript
                 if sc.input_transcription and sc.input_transcription.text:
                     input_transcript += sc.input_transcription.text
                 if sc.output_transcription and sc.output_transcription.text:
@@ -174,26 +194,7 @@ class GeminiLiveAudioModel(AudioToAudioModel):
                         if part.inline_data and part.inline_data.data:
                             audio_chunks.append(part.inline_data.data)
                 if sc.turn_complete:
-                    return
-
-        async with self._client.aio.live.connect(model=self.model, config=config) as session:
-            await session.send_realtime_input(activity_start=types.ActivityStart())
-            await session.send_realtime_input(
-                audio=types.Blob(data=pcm_bytes, mime_type=f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}")
-            )
-            await session.send_realtime_input(activity_end=types.ActivityEnd())
-
-            try:
-                await asyncio.wait_for(_drain(), timeout=RESPONSE_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError:
-                raise TimeoutError(
-                    f"Gemini Live API did not send turn_complete within "
-                    f"{RESPONSE_TIMEOUT_SECONDS}s -- the connection likely "
-                    f"dropped server-side without a clean close (confirmed "
-                    f"case: both sockets sat in CLOSE_WAIT). Caller should "
-                    f"retry with a fresh connection, not assume no answer "
-                    f"exists."
-                )
+                    break
 
         self.last_input_transcript = input_transcript
 

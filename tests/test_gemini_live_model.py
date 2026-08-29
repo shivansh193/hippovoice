@@ -140,6 +140,43 @@ def test_respond_raises_timeout_error_instead_of_hanging_forever(tmp_path, monke
         model.respond(input_path)
 
 
+def test_respond_raises_timeout_error_on_a_hang_during_connect_or_close(tmp_path, monkeypatch):
+    """
+    Regression test for a second, distinct real hang found while verifying
+    the fix above: wrapping only the receive() loop in a timeout wasn't
+    enough -- a second live run hung with the identical CLOSE_WAIT/
+    near-zero-CPU signature as the first, but this time nothing was ever
+    pending inside receive() to time out. The hang can just as easily be in
+    connect()'s own handshake (__aenter__) or in the session's close
+    sequence (__aexit__) trying to gracefully shut down a connection the
+    server already tore down unilaterally -- so the fix moved to wrapping
+    the ENTIRE `async with` block, not just the loop inside it. This
+    simulates a hang in __aenter__ specifically, the case the first fix's
+    narrower timeout would NOT have caught.
+    """
+    monkeypatch.setattr("gemini_live_model.RESPONSE_TIMEOUT_SECONDS", 0.05)
+
+    input_path = str(tmp_path / "in.wav")
+    sf.write(input_path, np.zeros(16000, dtype=np.int16), 16000)
+
+    model = GeminiLiveAudioModel()
+    model._client = MagicMock()
+
+    class HangingConnectCM:
+        async def __aenter__(self):
+            # Exactly what a stalled connection handshake looks like --
+            # never resolves, never raises on its own.
+            await asyncio.Event().wait()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    model._client.aio.live.connect = lambda model, config: HangingConnectCM()
+
+    with pytest.raises(TimeoutError):
+        model.respond(input_path)
+
+
 def test_respond_omits_system_instruction_by_default(tmp_path):
     """The default (None) must not appear in the config at all -- a live
     conversational demo shouldn't get an unsolicited instruction just
