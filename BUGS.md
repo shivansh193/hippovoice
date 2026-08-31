@@ -901,6 +901,16 @@ Add to this list; don't fix silently in passing.
   confirms all 10/10 conversations, 1540/1540 questions -- a complete,
   real result either way.
 
+- **A-MEM-style's full LoCoMo run completed cleanly (no cancellation,
+  no resume needed this time)** via the same `colab.ipynb` `SYSTEM='amem'`
+  path, pushed as version 4 of the `hippovoicefinalbenchmark` kernel,
+  2026-08-31. avg F1 = 22.02% over 1540 questions (bins: near_zero 1055,
+  partial 287, high 198) -- the most near-zero-heavy of the three
+  completed systems so far. HippoVoice (24.1%) now leads both real
+  baseline comparisons on the actual LoCoMo metric; the gap to Mem0-style
+  (23.4%) stays the closer of the two. NaiveRAG is the last baseline
+  still queued.
+
 - **`WeightEditBaseline` (ROME on GPT-2 XL) went from "never worked" to
   a fully validated, correct edit -- three real, distinct bugs found and
   fixed in sequence, each only reachable once the previous one was

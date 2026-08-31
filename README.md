@@ -22,14 +22,17 @@ category-branched, not a rough approximation of it):
 |---|---|---|
 | HippoVoice | 24.1% | 1540 (10 conversations, all QA pairs) |
 | Mem0-style | 23.4% | 1540 (10 conversations, all QA pairs) |
+| A-MEM-style | 22.0% | 1540 (10 conversations, all QA pairs) |
 
-HippoVoice's run finished 2026-07-11; Mem0-style's finished 2026-08-31,
-same harness, same LLM, same scorer. First real, completed head-to-head
-this project has had on the actual LoCoMo metric — HippoVoice edges it
-out, but it's close, and the error distribution is nearly identical (973
-near-zero / 380 partial / 187 high for Mem0-style vs 966/379/195 for
-HippoVoice). A-MEM-style and NaiveRAG are still queued — check
-[BUGS.md](BUGS.md) for what's actually confirmed versus what's pending.
+HippoVoice's run finished 2026-07-11; Mem0-style's finished 2026-08-31;
+A-MEM-style finished 2026-08-31 as well. Same harness, same LLM, same
+scorer across all three — HippoVoice currently leads both baselines on
+the actual LoCoMo metric, though the gap to Mem0-style is close (0.7
+points) and the error-distribution shape is similar across all three
+(near-zero/partial/high bins: 966/379/195 HippoVoice, 973/380/187
+Mem0-style, 1055/287/198 A-MEM-style). NaiveRAG is the last one still
+queued — check [BUGS.md](BUGS.md) for what's actually confirmed versus
+what's pending.
 
 There's also a smaller, synthetic benchmark (~90-100 turn conversations)
 for noise contamination: what fraction of retrieved context is actually
