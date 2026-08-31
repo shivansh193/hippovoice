@@ -141,13 +141,32 @@ class EasyEditWeightEditor:
         self._original_state_dict = copy.deepcopy(self.editor.model.state_dict())
 
     def edit(self, prompt: str, subject: str, target_new: str) -> None:
-        # keep_original_weight=False: confirmed from EasyEdit's source that
-        # ROME/MEMIT mutate editor.model's weights in place -- we want each
-        # successive edit() call in a conversation to stack on top of the
-        # previous ones (sequential editing is the entire point of this
-        # benchmark, see weight_edit_baseline.py's module docstring), not
-        # get quietly undone. reset() is the only place weights should
-        # actually roll back.
+        # sequential_edit=True is confirmed necessary, not optional, from
+        # reading edit_requests()/restore_after_edit() directly -- and this
+        # was a real, silent bug, not a guess: without it, every edit here
+        # was being applied AND THEN IMMEDIATELY UNDONE, every single call.
+        # editor.edit()'s default sequential_edit=False path calls
+        # restore_after_edit(self, edited_model, weights_copy) after EVERY
+        # edit; for any algorithm not in EasyEdit's small special-cased
+        # lists (LoRA/QLoRA/DPO, KN/GRACE/WISE/DEFER, MELO) -- which
+        # includes ROME -- that function's default branch manually copies
+        # every ORIGINAL parameter value in `weights_copy` back onto
+        # editor.model, i.e. reverts the edit it just made. sequential_edit
+        # =True skips that restore entirely, which is what actually lets
+        # ROME's in-place mutation (apply_algo is called with copy=False)
+        # survive past a single edit() call.
+        #
+        # The old comment here said keep_original_weight=False was what
+        # made edits stack -- also wrong, harmlessly: edit_requests()'s
+        # inner edit_func hardcodes keep_original_weight=False itself when
+        # calling apply_algo, so whatever we pass here never actually
+        # reaches it. Left out below since it does nothing.
+        #
+        # Confirmed for real on Kaggle across two separate runs: without
+        # this fix, "AFTER edit" came back byte-identical to "BEFORE edit"
+        # even after the dropout fix below made the computation itself
+        # correct -- the edit was being computed correctly and then thrown
+        # away by this exact restore path.
         #
         # model.train() here is confirmed necessary, not decorative: a real
         # Kaggle run showed load()'s gradient_checkpointing_enable() call
@@ -171,7 +190,7 @@ class EasyEditWeightEditor:
                 prompts=[prompt],
                 target_new=[target_new],
                 subject=[subject],
-                keep_original_weight=False,
+                sequential_edit=True,
                 verbose=False,
             )
         finally:
