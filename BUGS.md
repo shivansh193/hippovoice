@@ -872,6 +872,81 @@ Add to this list; don't fix silently in passing.
   real per-question cost, meaning that number's wall-clock time, not its
   F1 score, was the misleading part.
 
+## Fixed (continued)
+
+- **First real, completed head-to-head LoCoMo comparison: Mem0-style vs
+  HippoVoice, same harness, same LLM, same scorer.** Mem0-style avg F1 =
+  23.42% over 1540 questions (bins: near_zero 973, partial 380, high
+  187), run via `colab.ipynb`'s `SYSTEM='mem0'` path on Kaggle, completed
+  2026-08-31. HippoVoice's own 24.1% (2026-07-11, bins 966/379/195) edges
+  it out, but it's close, and the error-distribution shape is nearly
+  identical between the two. Every other baseline number in this project
+  before now came from the smaller signal/noise synthetic benchmark, not
+  this one -- this is the first time the actual LoCoMo avg-F1 metric has
+  had a real comparison point at all. A-MEM-style and NaiveRAG are next.
+
+  This specific run also survived a real interruption: it was cancelled
+  by Kaggle mid-run (a session-limit hit, not a crash or anything either
+  of us triggered) 7 of 10 conversations in, with a real partial result
+  (avg F1 ~23.9% over 1035 questions) already sitting in its checkpoint.
+  Rather than losing that and restarting cold, the checkpoint was pulled
+  down, its `fingerprint.commit` field patched to the rerun's current
+  HEAD (the only field that would have mismatched -- nothing in the
+  intervening commits touches this baseline's actual behavior, only
+  unrelated WeightEdit/audio fixes), uploaded as a Kaggle Dataset, and
+  wired into a small resume-copy step added to the LoCoMo cell (gated on
+  `SYSTEM == 'mem0'` and on the checkpoint path not already existing, so
+  it can never silently clobber a genuinely fresh run). `run_locomo`'s
+  own existing checkpoint-resume logic did the rest. Final checkpoint
+  confirms all 10/10 conversations, 1540/1540 questions -- a complete,
+  real result either way.
+
+- **`WeightEditBaseline` (ROME on GPT-2 XL) went from "never worked" to
+  a fully validated, correct edit -- three real, distinct bugs found and
+  fixed in sequence, each only reachable once the previous one was
+  cleared.** All three confirmed on live Kaggle T4 runs, not guessed:
+
+  1. **CUDA OOM at the edit step, 14MB short of the card.** Root cause,
+     confirmed by reading EasyEdit's own `compute_v.py`: ROME batches
+     ~15-20 reworded versions of the same sentence into one
+     forward+backward pass through all 48 layers (so the edit
+     generalizes across phrasings) -- that batched activation memory,
+     not the ~6GB of plain weights, exhausted the card. Fixed with
+     `gradient_checkpointing_enable()` on the loaded model.
+  2. **Checkpointing barely helped (free memory moved from 6.8MB to
+     10.8MB, still short).** HuggingFace gates checkpointing with
+     `if self.gradient_checkpointing and self.training`, and EasyEdit
+     leaves the model in `eval()` mode -- checkpointing was enabled but
+     never engaging. Fixed by wrapping the edit call in
+     `model.train()`/`model.eval()`.
+  3. **The OOM was gone, but "AFTER edit" came back byte-identical to
+     "BEFORE edit" -- a silent correctness bug, worse than a crash.**
+     Two compounding causes, both confirmed by reading EasyEdit's source
+     directly rather than guessing: GPT-2 XL's real dropout (~10%) got
+     turned back on by `train()` mode, corrupting ROME's correction
+     vector (fixed by zeroing every `nn.Dropout` module's `p`, making
+     dropout a true no-op in either mode); and separately,
+     `editor.edit()`'s default `sequential_edit=False` calls
+     `restore_after_edit()` after every edit, which for any algorithm
+     not in EasyEdit's small special-cased lists (ROME included) manually
+     copies the original parameters back over the model -- applying the
+     edit and then immediately undoing it, every single call. Fixed with
+     `sequential_edit=True`.
+
+  Also ruled out along the way: Kaggle's P100 accelerator is not a
+  memory fix for this -- its preinstalled PyTorch build has no CUDA
+  kernels for the P100's (Pascal, sm_60) architecture at all, unrelated
+  to how much VRAM it has.
+
+  Final validated sanity check: `BEFORE edit: 'Paris, France. The tower
+  is the'` -> `AFTER edit: 'Rome.\n\nThe Vatican is located'` -> `AFTER
+  reset: 'Paris, France. The tower is the'`. Correct edit, correct
+  revert. The one remaining blocker on a full WeightEdit LoCoMo run is
+  unrelated to any of this: `GEMINI_API_KEY` attached via Kaggle Secrets
+  and interactively verified working hasn't carried over to a CLI-pushed
+  "Save & Run All" commit across three separate attempts -- looks like a
+  real platform quirk, not something fixable from the notebook side.
+
 ## Open — carried over from earlier session (context.md)
 
 - Header table in `colab.ipynb` says Qwen3-4B, but the "Load LLM" cell
