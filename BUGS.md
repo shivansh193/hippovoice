@@ -957,6 +957,72 @@ Add to this list; don't fix silently in passing.
   "Save & Run All" commit across three separate attempts -- looks like a
   real platform quirk, not something fixable from the notebook side.
 
+## Fixed (continued)
+
+- **New self-hosted HippoAudio backend added: `Qwen25OmniAudioModel`
+  (Qwen2.5-Omni-3B), roughly 4x faster than `GeminiLiveAudioModel`,
+  validated on a real GPU before writing any adapter code.** Started
+  from a real, honest question: Gemini Live's confirmed ~35-45s/question
+  latency (see gemini_live_model.py's docstring) is real API latency,
+  not something fixable on our side -- is there a faster backend?
+
+  Two other candidates got investigated and ruled out for the same real
+  reason, confirmed from their actual source/docs, not guessed: **Moshi**
+  and **Amazon Nova Sonic** are both full-duplex/continuous conversational
+  models with no clean per-turn completion signal. Nova Sonic's own
+  official reference sample never even checks for one -- it just plays
+  audio through speakers until a human presses Enter, and its session
+  model has an 8-minute connection cap that only makes sense for a live
+  continuous call, not discrete Q&A turns. Building a heuristic (guess a
+  turn is "done" from a gap in output) would carry a real correctness
+  risk this project has been careful to avoid all along: a wrong guess
+  wouldn't crash, it would silently truncate or run past the real answer.
+
+  Qwen2.5-Omni's `model.generate()` turned out to be a genuine
+  synchronous call (confirmed from its own HF model card): send one
+  input, get back one complete `(text_ids, audio)` result -- no
+  streaming ambiguity, mapping directly onto `AudioToAudioModel.respond()`.
+
+  Before writing any adapter code, validated this for real on a
+  throwaway AWS `g4dn.xlarge` (provisioned via the AWS CLI, torn down
+  completely afterward -- no lingering instance, security group, or IAM
+  role/profile left behind, confirmed via `describe-instances`/
+  `describe-volumes`): loaded in ~120s (one-time), answered a real
+  spoken question correctly ("What is the capital of France?" ->
+  "Paris"), used 12.6GB peak VRAM (fits a T4's ~15GB with real headroom),
+  and completed the actual turn in **9.7s** -- roughly 4x faster than
+  Gemini's confirmed 35-45s. Chose the 3B variant over 7B specifically
+  for VRAM safety: 7B's plain bf16 weights alone (~14-15GB) leave
+  essentially no room on a T4 with ~14.5GB usable (the same card that
+  OOM'd on GPT-2 XL editing elsewhere in this project), while 3B's ~6GB
+  leaves real headroom.
+
+  One real parsing bug caught during that same live test, fixed before
+  it ever reached local code: `model.generate()`'s `text_ids` includes
+  the ENTIRE rendered chat template (system/user/assistant), not just
+  the new response -- naively decoding the full thing returns
+  `"system\n...\nuser\n\nassistant\nParis"` instead of just `"Paris"`.
+  Fixed by slicing off the prompt's own token length
+  (`text_ids[:, inputs.input_ids.shape[1]:]`) before decoding, not
+  string-matching on `"assistant\n"`, which wouldn't reliably survive
+  arbitrary system/user content.
+
+  Also confirmed a real, stated constraint from Qwen's own warning
+  during that test: audio output quality is only guaranteed with its
+  default system prompt -- overriding it (the same pattern
+  `GeminiLiveAudioModel.system_instruction` uses for concise-answer
+  tuning) is supported here too, but flagged as a real risk to audio
+  quality, not adopted by default the way it was for Gemini.
+
+  Needs a specific install (the Qwen2.5-Omni preview transformers
+  branch, plus `qwen-omni-utils`/`audioread`/`librosa`/`soundfile`), not
+  bundled into `requirements.txt` since it conflicts with the project's
+  normal `transformers>=4.40.0` pin -- same reasoning as EasyEdit's
+  separate install. Not exercised by the local test suite for the same
+  reason (`tests/test_qwen_omni_audio_model.py` mocks the model/
+  processor to cover the adapter's own logic instead). Full local suite:
+  203 passed, 2 deselected.
+
 ## Open — carried over from earlier session (context.md)
 
 - Header table in `colab.ipynb` says Qwen3-4B, but the "Load LLM" cell
