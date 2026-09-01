@@ -22,6 +22,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from pipeline_audio2audio import HippoAudioPipeline, MockAudioToAudioModel, _concatenate_audio
@@ -160,6 +161,60 @@ def test_concatenate_audio_produces_combined_duration(tmp_path):
     data, sr = sf.read(out)
     assert sr == 16000
     assert len(data) == int(0.3 * 16000) + int(0.5 * 16000)
+
+
+def test_concatenate_audio_retries_past_a_transient_read_race(tmp_path, monkeypatch):
+    """Direct regression test for a real, confirmed race: reading a
+    just-synthesized WAV file on Linux raised
+    soundfile.LibsndfileError immediately after the writing subprocess
+    had already exited, then succeeded on a retry moments later (see a
+    real Kaggle/AWS benchmark run in BUGS.md). Simulates exactly that --
+    the first two reads of one file raise, the third succeeds -- without
+    real sleeping (patches time.sleep) so this test stays fast."""
+    # sf/time are imported locally inside _concatenate_audio, not at
+    # module level -- patching the real soundfile/time modules directly
+    # (not pipeline_audio2audio's own namespace, which has no such
+    # attributes) still works, since `import soundfile as sf` just binds
+    # the same global module object under a local alias.
+    first = str(tmp_path / "a.wav")
+    second = str(tmp_path / "b.wav")
+    out = str(tmp_path / "combined.wav")
+    _make_silent_wav(first, duration_s=0.3)
+    _make_silent_wav(second, duration_s=0.5)
+
+    real_read = sf.read
+    call_count = {"first_path": 0}
+
+    def flaky_read(path, *args, **kwargs):
+        if path == first:
+            call_count["first_path"] += 1
+            if call_count["first_path"] < 3:
+                raise sf.LibsndfileError(0, prefix="simulated transient race: ")
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr("soundfile.read", flaky_read)
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    _concatenate_audio(first, second, out)
+
+    assert call_count["first_path"] == 3
+    data, sr = sf.read(out)
+    assert len(data) == int(0.3 * 16000) + int(0.5 * 16000)
+
+
+def test_concatenate_audio_reraises_after_exhausting_retries(tmp_path, monkeypatch):
+    """A genuinely broken/missing file must still raise -- the retry is
+    for a real, confirmed transient race, not a way to silently swallow
+    an actually-missing or actually-corrupt file."""
+    first = str(tmp_path / "never_exists.wav")
+    second = str(tmp_path / "b.wav")
+    out = str(tmp_path / "combined.wav")
+    _make_silent_wav(second, duration_s=0.5)
+
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    with pytest.raises(sf.LibsndfileError):
+        _concatenate_audio(first, second, out)
 
 
 def test_concatenate_audio_resamples_mismatched_sample_rates(tmp_path):

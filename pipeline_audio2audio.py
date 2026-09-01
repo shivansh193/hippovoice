@@ -123,13 +123,40 @@ def _concatenate_audio(first_path: str, second_path: str, output_path: str) -> N
     rate -- concatenating those without resampling would have silently
     produced distorted, wrong-speed audio. Caught here for free instead of
     discovering it on a paid AWS run.
+
+    Confirmed as a real, reproducible race on Linux (not Windows -- never
+    seen there), on a live AWS GPU benchmark run: reading first_path (the
+    context clip synthesize() just wrote, via tts/synthesize.py's
+    subprocess-isolated pyttsx3/espeak worker) raised
+    `soundfile.LibsndfileError: ... System error` immediately after that
+    subprocess had already exited. subprocess.run() waiting for the
+    child's exit doesn't guarantee espeak's own underlying writes are
+    visible to a `sf.read()` in this process the instant it returns --
+    a brief window, not a permanent failure (confirmed: the same file
+    read again moments later succeeds). Retrying with a short backoff is
+    the standard, pragmatic fix for exactly this class of "writer
+    process exited but the read isn't ready yet" race, rather than
+    guessing at deeper OS/filesystem flush semantics with no real way to
+    verify them from here.
     """
+    import time
+
     import soundfile as sf
     import numpy as np
     from scipy.signal import resample
 
-    data1, sr1 = sf.read(first_path)
-    data2, sr2 = sf.read(second_path)
+    def _read_with_retry(path, attempts=5, base_delay=0.1):
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return sf.read(path)
+            except sf.LibsndfileError as e:
+                last_error = e
+                time.sleep(base_delay * (2 ** attempt))
+        raise last_error
+
+    data1, sr1 = _read_with_retry(first_path)
+    data2, sr2 = _read_with_retry(second_path)
     if sr1 != sr2:
         target_len = int(len(data1) * sr2 / sr1)
         data1 = resample(data1, target_len)
