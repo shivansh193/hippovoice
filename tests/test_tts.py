@@ -205,6 +205,46 @@ def test_chunk_text_word_splits_a_single_over_length_sentence():
         assert len(chunk) <= _SAFE_CHUNK_CHARS
 
 
+def test_synthesize_retries_by_halving_when_a_chunk_under_the_limit_still_fails(tmp_path, monkeypatch):
+    """Direct regression test for the real reason a fixed chunk-size
+    threshold alone isn't trustworthy: a live benchmark run hit the
+    silent-failure bug on a real 96-character chunk -- UNDER
+    _SAFE_CHUNK_CHARS=100 -- despite synthetic 100-character test text
+    succeeding cleanly. Confirms a chunk that fails gets halved and
+    retried rather than immediately surfacing an error, by failing only
+    text longer than a threshold shorter than any single word here, so
+    the first attempt fails and a retry at half the length must succeed."""
+    import tts.synthesize as synthesize_mod
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        text = kwargs["input"]
+        output_path = cmd[3]
+        if len(text) > 20:
+            return FakeCompletedProcess()  # "succeeds" but never writes the file
+        sf.write(output_path, np.zeros(50, dtype=np.int16), 16000)
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(synthesize_mod.subprocess, "run", fake_run)
+
+    # Under _SAFE_CHUNK_CHARS (100) but over the fake failure threshold
+    # (20) -- takes the short-text path first, fails, must fall through
+    # to the chunk-and-retry path and succeed via halving.
+    text = "this text is under the chunk limit but still too long for the fake worker"
+    assert len(text) <= synthesize_mod._SAFE_CHUNK_CHARS
+
+    out_path = str(tmp_path / "out.wav")
+    result_path = synthesize(load_tts(), text, out_path)
+
+    assert result_path == out_path
+    data, sr = sf.read(out_path)
+    assert sr == 16000
+    assert len(data) > 0
+
+
 def test_synthesize_chunks_and_concatenates_long_text(tmp_path, monkeypatch):
     """End-to-end (mocked worker) confirmation that long text produces
     ONE output file, transparently to the caller, by synthesizing each

@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 # Confirmed as a real, reproducible deadlock: an isolated test with two
 # fresh, separate pyttsx3.init() calls in one process (no reuse of either
@@ -130,6 +131,38 @@ def _run_worker(mode: str, output_path: str, text: str, rate, volume) -> None:
         )
 
 
+def _synthesize_chunk_with_retry(chunk: str, rate, volume, chunk_paths: list, min_len: int = 15) -> None:
+    """Synthesizes one chunk, appending its output path to chunk_paths on
+    success. Confirmed real, not theoretical: a live benchmark run hit
+    the silent-failure bug on a 96-character REAL chunk despite synthetic
+    100-character test text succeeding cleanly, meaning the actual limit
+    is content-dependent (almost certainly tied to espeak's phonetic
+    processing of the specific words involved, not a clean character
+    count) -- no fixed _SAFE_CHUNK_CHARS value can be trusted alone for
+    arbitrary real content. On failure, splits the chunk in half at the
+    nearest word boundary and retries each half recursively, rather than
+    trusting any single size threshold to be universally safe. Stops
+    splitting at min_len and lets the real RuntimeError surface -- a
+    genuinely unsynthesizable few words (not just "still too long") is a
+    real failure worth seeing, not something to keep halving forever."""
+    chunk_path = tempfile.mktemp(suffix=".wav")
+    try:
+        _run_worker("file", chunk_path, chunk, rate, volume)
+        chunk_paths.append(chunk_path)
+    except RuntimeError:
+        if len(chunk) <= min_len:
+            raise
+        mid = len(chunk) // 2
+        split_at = chunk.rfind(" ", 0, mid)
+        if split_at <= 0:
+            split_at = mid
+        left, right = chunk[:split_at].strip(), chunk[split_at:].strip()
+        if left:
+            _synthesize_chunk_with_retry(left, rate, volume, chunk_paths, min_len)
+        if right:
+            _synthesize_chunk_with_retry(right, rate, volume, chunk_paths, min_len)
+
+
 def synthesize(engine, text: str, output_path: str, sample_rate: int = 22050) -> str:
     """
     Synthesise text to speech and write a WAV file.
@@ -145,24 +178,34 @@ def synthesize(engine, text: str, output_path: str, sample_rate: int = 22050) ->
     exactly the same per-call isolation every synthesize() call already
     uses, just called more than once), then concatenated into one file
     so callers see the same single-file contract regardless of length.
+
+    Confirmed for real that _SAFE_CHUNK_CHARS alone isn't a trustworthy
+    hard boundary: a real 96-character chunk from actual pipeline content
+    still hit the silent-failure bug despite synthetic 100-character test
+    text succeeding cleanly -- the real limit is content-dependent (likely
+    tied to espeak's phonetic processing of specific words, not a clean
+    character count), not a fixed number this constant can pin exactly.
+    So every individual chunk synthesis is wrapped with a retry-by-
+    halving fallback (see _synthesize_chunk_with_retry) rather than
+    trusting the chunk size alone to be universally safe.
     """
     rate = _get_property(engine, "rate", 175)
     volume = _get_property(engine, "volume", 1.0)
 
     if len(text) <= _SAFE_CHUNK_CHARS:
-        _run_worker("file", output_path, text, rate, volume)
-        return output_path
+        try:
+            _run_worker("file", output_path, text, rate, volume)
+            return output_path
+        except RuntimeError:
+            pass  # fall through to the chunk-with-retry path below
 
-    import tempfile
     import numpy as np
     import soundfile as sf
 
     chunk_paths = []
     try:
         for chunk in _chunk_text(text):
-            chunk_path = tempfile.mktemp(suffix=".wav")
-            _run_worker("file", chunk_path, chunk, rate, volume)
-            chunk_paths.append(chunk_path)
+            _synthesize_chunk_with_retry(chunk, rate, volume, chunk_paths)
 
         arrays = []
         sr = None
