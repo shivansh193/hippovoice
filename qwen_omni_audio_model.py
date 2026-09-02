@@ -150,4 +150,22 @@ class Qwen25OmniAudioModel:
 
         response_path = tempfile.mktemp(suffix=".wav")
         sf.write(response_path, audio.reshape(-1).detach().cpu().numpy(), samplerate=QWEN_OUTPUT_SAMPLE_RATE)
+
+        # Confirmed as a real, distinct bug on a live benchmark run, not
+        # theoretical: peak VRAM climbed from ~12.6GB (the very first
+        # call, see module docstring) to a CUDA OOM by the third call in
+        # the same process -- generate()'s intermediate tensors (the
+        # DiT-based Token2Wav vocoder's own working memory in particular,
+        # per the OOM traceback) weren't being released between calls.
+        # Dropping references and clearing PyTorch's caching allocator
+        # here is the standard mitigation for exactly this shape of
+        # problem; unlike a precision change, this has zero effect on the
+        # actual output, only on how much GPU memory sits idle-but-
+        # reserved between calls.
+        del text_ids, generated_ids, audio, inputs
+        import torch
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
         return response_path, transcript
