@@ -157,3 +157,27 @@ def test_respond_calls_load_if_not_already_loaded(tmp_path, monkeypatch):
     model.respond(audio_path)
 
     assert model._model is not None
+
+
+def test_respond_clears_cuda_cache_after_each_call(tmp_path, monkeypatch):
+    """Direct regression test for a real, confirmed bug: peak VRAM
+    climbed call over call on a live benchmark run (~12.6GB on the first
+    call to a CUDA OOM by the third), because generate()'s intermediate
+    tensors weren't being released between calls in the same process.
+    Confirms respond() actually calls torch.cuda.empty_cache() (and
+    gc.collect()) after every call, not just once at some other point."""
+    import torch
+
+    model = Qwen25OmniAudioModel()
+    model._model, model._processor = _make_mock_model_and_processor()
+
+    audio_path = str(tmp_path / "question.wav")
+    sf.write(audio_path, np.zeros(16000, dtype=np.int16), 16000)
+
+    empty_cache_calls = []
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: empty_cache_calls.append(1))
+
+    model.respond(audio_path)
+    model.respond(audio_path)
+
+    assert len(empty_cache_calls) == 2  # once per respond() call, not just the first
