@@ -95,12 +95,13 @@ def test_synthesize_reads_rate_and_volume_from_the_handle(tmp_path, monkeypatch)
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
-        # A real successful worker run creates the output file -- synthesize()
-        # now verifies that (see the real, confirmed silent-failure bug this
-        # check exists for in tts/synthesize.py's module docstring), so the
-        # fake here needs to too, or this mock no longer matches real behavior.
-        with open(cmd[3], "w") as f:
-            f.write("")
+        # A real successful worker run creates a real, valid WAV file --
+        # synthesize() now verifies both that the file exists AND that it's
+        # readable audio (see the real, confirmed silent-failure and
+        # corrupt-file bugs this check exists for in tts/synthesize.py's
+        # module docstring), so the fake here needs to produce real audio
+        # too, not just touch an empty file.
+        sf.write(cmd[3], np.zeros(50, dtype=np.int16), 16000)
         return FakeCompletedProcess()
 
     monkeypatch.setattr(synthesize_mod.subprocess, "run", fake_run)
@@ -166,6 +167,32 @@ def test_run_worker_raises_clear_error_when_file_never_written(tmp_path, monkeyp
     monkeypatch.setattr(synthesize_mod.subprocess, "run", fake_run_no_file)
 
     with pytest.raises(RuntimeError, match="never wrote"):
+        synthesize(load_tts(), "short text under the chunk limit", str(tmp_path / "out.wav"))
+
+
+def test_run_worker_raises_clear_error_when_file_is_corrupt(tmp_path, monkeypatch):
+    """Direct regression test for a third, distinct real failure mode
+    found on the very next benchmark run after the missing-file and
+    GPU-memory fixes: the worker can exit 0 and create the file, but
+    write invalid/truncated audio data --
+    soundfile.LibsndfileError('...Format not recognised') reading it
+    back. Confirms this is now caught right here (by actually reading
+    the file back, not just checking it exists) instead of surfacing
+    downstream in a completely different file."""
+    import tts.synthesize as synthesize_mod
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stderr = ""
+
+    def fake_run_corrupt_file(cmd, **kwargs):
+        with open(cmd[3], "wb") as f:
+            f.write(b"not a real wav file")
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(synthesize_mod.subprocess, "run", fake_run_corrupt_file)
+
+    with pytest.raises(RuntimeError, match="isn't valid audio"):
         synthesize(load_tts(), "short text under the chunk limit", str(tmp_path / "out.wav"))
 
 

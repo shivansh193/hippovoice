@@ -114,7 +114,10 @@ def _run_worker(mode: str, output_path: str, text: str, rate, volume) -> None:
     if result.returncode != 0:
         raise RuntimeError(f"TTS subprocess failed (exit {result.returncode}): {result.stderr}")
 
-    if mode == "file" and not os.path.exists(output_path):
+    if mode != "file":
+        return
+
+    if not os.path.exists(output_path):
         # Confirmed as a real, silent failure mode, not theoretical: the
         # worker can exit 0 with empty stdout/stderr and never create the
         # file at all (see _SAFE_CHUNK_CHARS's docstring -- this is what
@@ -128,6 +131,26 @@ def _run_worker(mode: str, output_path: str, text: str, rate, volume) -> None:
             f"wrote {output_path!r} -- a real, confirmed pyttsx3/espeak "
             f"failure mode on Linux for text over ~100-150 characters. "
             f"text length was {len(text)}."
+        )
+
+    # Confirmed as a third, distinct real failure mode on the very next
+    # benchmark run after the two fixes above: the worker can exit 0 and
+    # create the file, but write invalid/corrupt/truncated audio data --
+    # soundfile.LibsndfileError("...Format not recognised") reading it
+    # back. Same underlying class of problem as the missing-file case
+    # (espeak failing partway through in a way pyttsx3's wrapper doesn't
+    # surface as a Python exception), just a different symptom. Actually
+    # trying to read the file back here, not just checking it exists,
+    # catches this too -- and lets _synthesize_chunk_with_retry's
+    # halving fallback handle it the same way.
+    import soundfile as sf
+    try:
+        sf.read(output_path)
+    except sf.LibsndfileError as e:
+        raise RuntimeError(
+            f"TTS worker exited successfully and created {output_path!r}, "
+            f"but the file isn't valid audio ({e}) -- text length was "
+            f"{len(text)}."
         )
 
 
