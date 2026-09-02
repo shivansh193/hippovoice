@@ -22,6 +22,7 @@ fix, using real pyttsx3 -- no GPU, no network, just real wall-clock time
 import os
 import time
 
+import numpy as np
 import pytest
 import soundfile as sf
 
@@ -94,6 +95,12 @@ def test_synthesize_reads_rate_and_volume_from_the_handle(tmp_path, monkeypatch)
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
+        # A real successful worker run creates the output file -- synthesize()
+        # now verifies that (see the real, confirmed silent-failure bug this
+        # check exists for in tts/synthesize.py's module docstring), so the
+        # fake here needs to too, or this mock no longer matches real behavior.
+        with open(cmd[3], "w") as f:
+            f.write("")
         return FakeCompletedProcess()
 
     monkeypatch.setattr(synthesize_mod.subprocess, "run", fake_run)
@@ -136,3 +143,98 @@ def test_synthesize_raises_timeout_error_instead_of_hanging_forever(tmp_path, mo
 
     with pytest.raises(TimeoutError):
         synthesize(load_tts(), "hello", str(tmp_path / "out.wav"))
+
+
+def test_run_worker_raises_clear_error_when_file_never_written(tmp_path, monkeypatch):
+    """Direct regression test for a real, confirmed silent failure found
+    on a live AWS benchmark run: pyttsx3's espeak driver on Linux can
+    exit 0 with empty stdout/stderr and never write the output file at
+    all (see _SAFE_CHUNK_CHARS's docstring -- this is exactly what
+    happens for text over ~100-150 characters, before the chunking fix
+    catches it first). Confirms this now fails loudly right here instead
+    of surfacing as a confusing soundfile.LibsndfileError far downstream
+    in a completely different file (pipeline_audio2audio.py)."""
+    import tts.synthesize as synthesize_mod
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stderr = ""
+
+    def fake_run_no_file(cmd, **kwargs):
+        return FakeCompletedProcess()  # never creates cmd[3]'s file
+
+    monkeypatch.setattr(synthesize_mod.subprocess, "run", fake_run_no_file)
+
+    with pytest.raises(RuntimeError, match="never wrote"):
+        synthesize(load_tts(), "short text under the chunk limit", str(tmp_path / "out.wav"))
+
+
+def test_chunk_text_keeps_every_chunk_under_the_limit():
+    """The actual fix's core logic: confirmed real via direct testing on
+    the affected Linux machine that pyttsx3/espeak silently fails past
+    ~100-150 characters -- every chunk produced here must stay at or
+    under _SAFE_CHUNK_CHARS regardless of input shape (short sentences,
+    one very long run-on sentence with no punctuation at all, etc.)."""
+    from tts.synthesize import _chunk_text, _SAFE_CHUNK_CHARS
+
+    long_text = (
+        "earlier in this conversation: I work as a nurse at the city "
+        "hospital downtown; My favorite color is purple and I love "
+        "hiking on weekends. some other things to remember: My dog's "
+        "name is Max and he is a golden retriever."
+    )
+    chunks = _chunk_text(long_text)
+    assert len(chunks) > 1  # this exact text is confirmed to exceed the limit
+    for chunk in chunks:
+        assert len(chunk) <= _SAFE_CHUNK_CHARS
+    # No words dropped in the split -- every word from the original
+    # appears somewhere across the chunks, in order.
+    assert " ".join(chunks).split() == long_text.split()
+
+
+def test_chunk_text_word_splits_a_single_over_length_sentence():
+    """The rare fallback path: one "sentence" (no ./!/?/; anywhere) that
+    alone exceeds the limit must still get split -- on word boundaries,
+    not truncated or left whole to silently fail synthesis."""
+    from tts.synthesize import _chunk_text, _SAFE_CHUNK_CHARS
+
+    run_on = "word " * 40  # 200 chars, zero sentence-ending punctuation
+    chunks = _chunk_text(run_on)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= _SAFE_CHUNK_CHARS
+
+
+def test_synthesize_chunks_and_concatenates_long_text(tmp_path, monkeypatch):
+    """End-to-end (mocked worker) confirmation that long text produces
+    ONE output file, transparently to the caller, by synthesizing each
+    chunk separately and concatenating -- the actual fix for the real
+    bug: _build_context_audio's memory-summary text routinely exceeds
+    the confirmed length limit after a few real turns."""
+    import tts.synthesize as synthesize_mod
+
+    call_count = {"n": 0}
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        call_count["n"] += 1
+        # Each chunk call writes a small real WAV so the concatenation
+        # step has real audio data to read and combine.
+        samples = np.full(100, call_count["n"], dtype=np.int16)
+        sf.write(cmd[3], samples, 16000)
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(synthesize_mod.subprocess, "run", fake_run)
+
+    long_text = "word " * 40  # confirmed to exceed _SAFE_CHUNK_CHARS
+    out_path = str(tmp_path / "out.wav")
+    result_path = synthesize(load_tts(), long_text, out_path)
+
+    assert result_path == out_path
+    assert call_count["n"] > 1  # actually split into multiple worker calls
+    data, sr = sf.read(out_path)
+    assert sr == 16000
+    assert len(data) == 100 * call_count["n"]  # all chunks' audio present, in order
