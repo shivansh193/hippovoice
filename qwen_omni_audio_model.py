@@ -83,24 +83,20 @@ class Qwen25OmniAudioModel:
         self._processor = None
 
     def load(self):
-        # Confirmed as a real, if partial, mitigation for a real bug: a
-        # live benchmark run still hit CUDA OOM by question 15 even with
-        # the per-call cache-clearing in respond() below (which alone
-        # took it from crashing at question 3 to question 15 -- real
-        # progress, not nothing, but memory still crept up over many
-        # calls). The OOM's own error message suggested
-        # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; setting both
-        # that and the newer PYTORCH_ALLOC_CONF alias (this project hit
-        # the same suggestion under the older name for a different OOM --
-        # see baselines/easyedit_weight_editor.py -- and different
-        # PyTorch/transformers versions read one or the other) since
-        # there's no cost to setting both. Must happen before any CUDA
-        # call in this process, which load() -- called once, before any
-        # other GPU work -- naturally is.
-        import os
-        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
-
+        # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True was tried here
+        # after a live run hit CUDA OOM by question 15 (the OOM's own
+        # error message suggested it, and this project's earlier
+        # WeightEdit OOM used the same knob -- see
+        # baselines/easyedit_weight_editor.py). Confirmed a REGRESSION on
+        # a real re-run, not an improvement: with it set, the very FIRST
+        # generate() call OOM'd, with the allocator's own log showing
+        # "expandable_segments: memory mapping failed" twice before the
+        # fatal error -- worse than the question-15 failure without it.
+        # expandable_segments' virtual-memory-mapping strategy apparently
+        # doesn't suit this specific model's allocation pattern. Left
+        # deliberately unset; per-call cache-clearing in respond() below
+        # is the mitigation that's actually confirmed to help (took a
+        # real run from crashing at question 3 to question 15).
         from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 
         self._model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
