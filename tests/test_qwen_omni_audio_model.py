@@ -181,3 +181,48 @@ def test_respond_clears_cuda_cache_after_each_call(tmp_path, monkeypatch):
     model.respond(audio_path)
 
     assert len(empty_cache_calls) == 2  # once per respond() call, not just the first
+
+
+def test_load_sets_expandable_segments_before_loading_the_model(monkeypatch):
+    """Direct regression test for a real, if partial, mitigation: a live
+    benchmark run still hit CUDA OOM by question 15 even with respond()'s
+    per-call cache-clearing (confirmed real progress on its own -- from
+    crashing at question 3 without it, to question 15 with it -- just not
+    enough alone). The OOM's own error message suggested
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; confirms load()
+    actually sets it (and the newer PYTORCH_ALLOC_CONF alias) before
+    touching the model, using a fake transformers module so this runs
+    without the real Qwen2.5-Omni preview branch or a GPU."""
+    import os
+    from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
+
+    for var in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF"):
+        monkeypatch.delenv(var, raising=False)
+
+    # Patching the classmethod directly on the real classes, not
+    # replacing the class binding on the `transformers` module itself --
+    # transformers' lazy-import machinery didn't honor a plain
+    # monkeypatch.setattr(transformers, "Qwen2_5Omni...", fake) in
+    # practice (the real from_pretrained still ran), but patching the
+    # method on the actual class object sidesteps that entirely.
+    monkeypatch.setattr(
+        Qwen2_5OmniForConditionalGeneration, "from_pretrained",
+        classmethod(lambda cls, *a, **k: MagicMock()),
+    )
+    monkeypatch.setattr(
+        Qwen2_5OmniProcessor, "from_pretrained",
+        classmethod(lambda cls, *a, **k: MagicMock()),
+    )
+
+    model = Qwen25OmniAudioModel()
+    try:
+        model.load()
+        assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
+        assert os.environ["PYTORCH_ALLOC_CONF"] == "expandable_segments:True"
+    finally:
+        # load() sets these via os.environ.setdefault() directly, which
+        # monkeypatch's own auto-revert doesn't track (it only tracks
+        # changes made through monkeypatch.setenv/delenv) -- clean up
+        # manually so this test doesn't leak env state into others.
+        for var in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF"):
+            os.environ.pop(var, None)
