@@ -54,6 +54,27 @@ needs the real model/torch/CUDA installed; the local suite mocks the
 model/processor to cover this file's own parsing/plumbing logic
 instead). Validated for real on the throwaway GPU instance described
 above, not guessed.
+
+return_audio=False (constructor param, default True to preserve a live
+conversational deployment's actual need for spoken audio out) is a
+second, real fix discovered on a live full-benchmark re-run, distinct
+from the per-call cache-clearing and the reverted expandable_segments
+attempt: with the confirmed-good fixes (concise system_instruction,
+cache-clearing) in place and no expandable_segments, the very FIRST
+generate() call on a real LoCoMo question still OOM'd -- "Tried to
+allocate 2.00 GiB. GPU 0 has a total capacity of 14.56 GiB ... this
+process has 13.35 GiB memory in use" -- inside self.token2wav(...)'s
+DiT-based vocoder (see the traceback in BUGS.md). That 2.00 GiB figure
+lines up exactly with Qwen's own documented savings from
+return_audio=False ("This option will save about ~2GB of GPU memory",
+per its HF model card) -- real corroborating evidence, not a guess,
+that the audio-decoding step itself (not a cross-call leak, already
+mitigated separately) was what pushed a single T4's 14.56GB over the
+edge on real conversation-length input. Since this benchmark only
+scores the TEXT transcript and always discards the response audio path
+(see benchmarks/locomo/evaluate_audio.py), there's no real audio output
+to lose by setting this False for benchmark runs specifically -- a live
+conversational deployment would still want it True.
 """
 
 QWEN_OUTPUT_SAMPLE_RATE = 24000
@@ -65,6 +86,7 @@ class Qwen25OmniAudioModel:
         model_name: str = "Qwen/Qwen2.5-Omni-3B",
         speaker: str = "Chelsie",
         system_instruction: str | None = None,
+        return_audio: bool = True,
     ):
         # system_instruction stays None by default deliberately: a real,
         # confirmed warning from the live test says audio output quality
@@ -79,6 +101,12 @@ class Qwen25OmniAudioModel:
         self.model_name = model_name
         self.speaker = speaker
         self.system_instruction = system_instruction
+        # See module docstring: real, confirmed to save ~2GB of GPU
+        # memory by skipping the token2wav vocoder step entirely. Only
+        # set False for a use case (like a benchmark) that discards the
+        # response audio anyway -- a live deployment needs real speech
+        # out, so True stays the default.
+        self.return_audio = return_audio
         self._model = None
         self._processor = None
 
@@ -144,7 +172,22 @@ class Qwen25OmniAudioModel:
         )
         inputs = inputs.to(self._model.device).to(self._model.dtype)
 
-        text_ids, audio = self._model.generate(**inputs, use_audio_in_video=False, speaker=self.speaker)
+        # Real, confirmed API shape difference (see module docstring):
+        # generate() returns a (text_ids, audio) tuple when return_audio
+        # is True, but ONLY text_ids (no tuple at all) when False -- not
+        # (text_ids, None). Branching on self.return_audio rather than
+        # inspecting the return value's shape, since a tuple-vs-bare-
+        # tensor check would be guessing at an internal detail that's
+        # already known from Qwen's own documented contract.
+        if self.return_audio:
+            text_ids, audio = self._model.generate(
+                **inputs, use_audio_in_video=False, speaker=self.speaker, return_audio=True,
+            )
+        else:
+            text_ids = self._model.generate(
+                **inputs, use_audio_in_video=False, speaker=self.speaker, return_audio=False,
+            )
+            audio = None
 
         # Slicing off the prompt's own token length before decoding, not
         # string-splitting on "assistant\n" -- confirmed real from the
@@ -159,11 +202,20 @@ class Qwen25OmniAudioModel:
         generated_ids = text_ids[:, prompt_len:]
         transcript = self._processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
 
-        import tempfile
-        import soundfile as sf
+        if self.return_audio:
+            import tempfile
+            import soundfile as sf
 
-        response_path = tempfile.mktemp(suffix=".wav")
-        sf.write(response_path, audio.reshape(-1).detach().cpu().numpy(), samplerate=QWEN_OUTPUT_SAMPLE_RATE)
+            response_path = tempfile.mktemp(suffix=".wav")
+            sf.write(response_path, audio.reshape(-1).detach().cpu().numpy(), samplerate=QWEN_OUTPUT_SAMPLE_RATE)
+        else:
+            # No audio was generated -- nothing to save. Callers that
+            # only need the transcript (every current caller in this
+            # project: evaluate_audio.py discards this path entirely,
+            # see module docstring) are fine with None here; a live
+            # deployment wanting real audio out must leave return_audio
+            # at its True default instead of handling None itself.
+            response_path = None
 
         # Confirmed as a real, distinct bug on a live benchmark run, not
         # theoretical: peak VRAM climbed from ~12.6GB (the very first

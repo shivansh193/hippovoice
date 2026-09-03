@@ -32,10 +32,15 @@ def fake_qwen_omni_utils(monkeypatch):
     return fake_module
 
 
-def _make_mock_model_and_processor(prompt_len=10, response_tokens=(1, 2, 3), response_text="Paris"):
+def _make_mock_model_and_processor(
+    prompt_len=10, response_tokens=(1, 2, 3), response_text="Paris", return_audio=True,
+):
     """Builds a mock model + processor pair matching the real shapes
     respond() reads from: inputs.input_ids.shape[1] for the prompt
-    length, model.generate() returning (text_ids, audio)."""
+    length, model.generate() returning (text_ids, audio) when
+    return_audio=True, or bare text_ids (no tuple) when False -- a real,
+    confirmed API shape difference (see qwen_omni_audio_model.py's
+    docstring), not a guess."""
     mock_processor = MagicMock()
     mock_processor.apply_chat_template.return_value = "rendered chat template"
 
@@ -56,7 +61,7 @@ def _make_mock_model_and_processor(prompt_len=10, response_tokens=(1, 2, 3), res
     mock_model = MagicMock()
     mock_model.device = "cpu"
     mock_model.dtype = "float32"
-    mock_model.generate.return_value = (full_ids, mock_audio)
+    mock_model.generate.return_value = (full_ids, mock_audio) if return_audio else full_ids
 
     def fake_batch_decode(ids, skip_special_tokens=True):
         # Confirms respond() actually passed the SLICED ids, not the full
@@ -181,6 +186,49 @@ def test_respond_clears_cuda_cache_after_each_call(tmp_path, monkeypatch):
     model.respond(audio_path)
 
     assert len(empty_cache_calls) == 2  # once per respond() call, not just the first
+
+
+def test_respond_passes_return_audio_false_to_generate_and_skips_audio_save(tmp_path):
+    """Direct regression test for the real, confirmed fix that replaced
+    the reverted expandable_segments attempt: a live re-run with the
+    other fixes (cache-clearing, concise system_instruction) in place
+    still OOM'd on the FIRST generate() call ("Tried to allocate 2.00
+    GiB") inside the token2wav vocoder -- and Qwen's own HF model card
+    documents return_audio=False as saving "about ~2GB of GPU memory"
+    by skipping exactly that step. Confirms respond() (a) actually
+    passes return_audio=False through to generate(), (b) doesn't try to
+    unpack a tuple that generate() no longer returns in that mode, and
+    (c) doesn't attempt to save audio that was never generated."""
+    model = Qwen25OmniAudioModel(return_audio=False)
+    model._model, model._processor = _make_mock_model_and_processor(
+        prompt_len=10, response_tokens=(1, 2, 3), response_text="Paris", return_audio=False,
+    )
+
+    audio_path = str(tmp_path / "question.wav")
+    sf.write(audio_path, np.zeros(16000, dtype=np.int16), 16000)
+
+    response_path, transcript = model.respond(audio_path)
+
+    assert transcript == "Paris"
+    assert response_path is None
+    assert model._model.generate.call_args.kwargs["return_audio"] is False
+
+
+def test_respond_passes_return_audio_true_by_default(tmp_path):
+    """Complements the False case above: confirms the default (a live
+    conversational deployment that actually needs spoken audio out)
+    still requests it explicitly, rather than silently relying on
+    generate()'s own default."""
+    model = Qwen25OmniAudioModel()
+    model._model, model._processor = _make_mock_model_and_processor()
+
+    audio_path = str(tmp_path / "question.wav")
+    sf.write(audio_path, np.zeros(16000, dtype=np.int16), 16000)
+
+    response_path, _ = model.respond(audio_path)
+
+    assert response_path is not None
+    assert model._model.generate.call_args.kwargs["return_audio"] is True
 
 
 def test_load_does_not_set_expandable_segments(monkeypatch):
