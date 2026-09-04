@@ -1023,6 +1023,78 @@ Add to this list; don't fix silently in passing.
   processor to cover the adapter's own logic instead). Full local suite:
   203 passed, 2 deselected.
 
+- **First complete, real HippoAudio benchmark result on Qwen2.5-Omni:
+  40/40 questions, avg F1 25.81%, after a chain of four real bugs found
+  only by actually running the full pipeline on a GPU.** The sanity
+  check above (12.6GB VRAM, one tiny question) didn't surface any of
+  these -- each needed the real LoCoMo pipeline (TTS-synthesized
+  questions, real conversation-length context, dozens of consecutive
+  calls) to show up:
+
+  1. **pyttsx3/espeak silent length-limit failure** (`tts/synthesize.py`):
+     text over ~100-150 characters made the worker subprocess exit 0
+     with no output file and no error -- a genuine silent failure, not a
+     crash. Initially misdiagnosed as a timing race and "fixed" with a
+     retry-with-backoff in `pipeline_audio2audio.py`'s
+     `_concatenate_audio` (wrong -- the exact same error recurred next
+     run). Properly root-caused via isolated binary-search testing on
+     the real Linux machine (ruled out shell-escaping) and fixed for
+     real via sentence-boundary chunking + retry-by-halving. A third,
+     distinct failure mode (corrupt file content, not missing) turned up
+     on the very next run and needed a separate audio-readability check,
+     not just a file-existence check.
+
+  2. **GPU memory climbing across calls in the same process**: peak VRAM
+     grew from the sanity check's ~12.6GB (one call) to a real
+     `torch.OutOfMemoryError` by question 3 on the first attempted full
+     run. `generate()`'s intermediate tensors (the DiT-based Token2Wav
+     vocoder's own working memory, per the traceback) weren't being
+     released between calls. Fixed with `torch.cuda.empty_cache()` +
+     `gc.collect()` after every `respond()` call -- took the same run
+     from failing at question 3 to question 15.
+
+  3. **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` regression**:
+     tried next, on the strength of PyTorch's own OOM error message
+     suggesting it (and this project's own WeightEdit OOM having used
+     the same knob). A live re-run with it set OOM'd on the very FIRST
+     `generate()` call instead of question 15 -- the allocator's own log
+     showed `expandable_segments: memory mapping failed` twice before
+     the fatal error. A genuine regression for this model's allocation
+     pattern, not an improvement -- reverted, with a regression-guard
+     test (`test_load_does_not_set_expandable_segments`) added so it
+     doesn't quietly come back.
+
+  4. **Still OOM'd on the first real question even after reverting #3**:
+     with only the confirmed-good fixes (cache-clearing, plus a concise
+     `system_instruction` addressing a separate verbosity problem that
+     was burying otherwise-correct answers in filler and hedging) in
+     place, a fresh run still hit `torch.OutOfMemoryError` trying to
+     allocate 2.00 GiB, inside `token2wav(...)`'s vocoder, on question 1
+     -- proving the leak-across-calls fix and the `expandable_segments`
+     revert were both real but incomplete; a single T4's 14.56GB was
+     already nearly exhausted by one real forward pass, independent of
+     any cross-call leak. Qwen's own HF model card documents
+     `return_audio=False` as saving "about ~2GB of GPU memory" by
+     skipping exactly that vocoder step -- the 2.00 GiB figure lined up
+     exactly. Added as an opt-in constructor param (default `True`, so a
+     live conversational deployment keeps real audio out); since this
+     benchmark only scores the text transcript and always discards the
+     response audio path anyway, there's nothing lost setting it `False`
+     here. A minimal single-question sanity check on a fresh instance
+     confirmed VRAM held flat (11.98GB/12.09GB allocated/reserved,
+     identical before and after two consecutive calls) before spending a
+     full run on it.
+
+  With all four fixes in place, a clean 40-question run (2 conversations
+  x 20 QA, `gemini-3.5-flash-lite` for extraction) completed in 1545s
+  (~26min) with **zero errors**: avg F1 **25.81%** (21 near-zero, 15
+  partial, 4 high-scoring), comparable to this project's own text-only
+  Mem0-style baseline (23.4%, see README.md) despite going through a
+  full TTS -> Qwen2.5-Omni -> transcript round trip rather than reading
+  text directly. This replaces the earlier stale/partial 14/20 result
+  (see prior entry) which reflected verbosity/hedging rather than a
+  complete or fully-fixed run.
+
 ## Open — carried over from earlier session (context.md)
 
 - Header table in `colab.ipynb` says Qwen3-4B, but the "Load LLM" cell
