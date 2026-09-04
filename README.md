@@ -149,9 +149,15 @@ comparisons and further tuning are ongoing.
 
 Track 2 (audio-to-audio + memory) has a real, confirmed win: on a live
 multi-turn run through `HippoAudioPipeline` and Gemini's Live API, a fact
-stated in turn 1 got correctly recalled in turn 3. A full LoCoMo-scale
-benchmark for this track is running now, so there's no aggregate number
-yet, just the one confirmed case.
+stated in turn 1 got correctly recalled in turn 3. Gemini Live's own API
+latency (~35-45s/question) made a larger benchmark impractical there, so
+a second, self-hosted backend (`Qwen25OmniAudioModel`, Qwen2.5-Omni-3B)
+was validated instead: after fixing four real bugs surfaced only by
+running the full pipeline on a GPU (see `BUGS.md`), a complete 40-question
+LoCoMo run finished with **25.81% avg F1** -- comparable to Track 1's own
+text-only Mem0-style baseline (23.4%) despite going through a full
+TTS -> Qwen2.5-Omni -> transcript round trip rather than reading text
+directly.
 
 The weight-editing baseline (ROME/MEMIT on GPT-2 XL) is built and being
 benchmarked as an alternative to retrieval-based memory. Worth reading
