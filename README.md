@@ -154,10 +154,21 @@ latency (~35-45s/question) made a larger benchmark impractical there, so
 a second, self-hosted backend (`Qwen25OmniAudioModel`, Qwen2.5-Omni-3B)
 was validated instead: after fixing four real bugs surfaced only by
 running the full pipeline on a GPU (see `BUGS.md`), a complete 40-question
-LoCoMo run finished with **25.81% avg F1** -- comparable to Track 1's own
-text-only Mem0-style baseline (23.4%) despite going through a full
-TTS -> Qwen2.5-Omni -> transcript round trip rather than reading text
-directly.
+LoCoMo run finished with **25.81% avg F1** (text-out only, `return_audio=
+False`) -- comparable to Track 1's own text-only Mem0-style baseline
+(23.4%) despite going through a full TTS -> Qwen2.5-Omni -> transcript
+round trip rather than reading text directly.
+
+Real audio OUTPUT (not just text) needed a bigger GPU: a single T4 had
+just enough headroom for the model itself but not also for real-length
+memory context plus the audio vocoder, confirmed via direct testing, not
+guessed. On a `g5.xlarge` (A10G, 24GB) the same self-hosted backend
+reproduced Track 2's original live win for real: turn 1 "My favorite
+color is blue" -> unrelated turn 2 -> turn 3 "What is my favorite color?"
+got the real spoken reply "Your favorite color is blue," with real TTS
+input, real extraction, real retrieval, and real audio output throughout
+-- zero OOM, VRAM barely moving. See `BUGS.md` for the full diagnostic
+trail.
 
 The weight-editing baseline (ROME/MEMIT on GPT-2 XL) is built and being
 benchmarked as an alternative to retrieval-based memory. Worth reading

@@ -1095,6 +1095,64 @@ Add to this list; don't fix silently in passing.
   (see prior entry) which reflected verbosity/hedging rather than a
   complete or fully-fixed run.
 
+- **Real audio-in/audio-out + memory recall confirmed live on Qwen2.5-Omni
+  -- the same "fact recalled turns later" win this project already had on
+  GeminiLiveAudioModel, now on the self-hosted backend, with a GPU tier
+  that actually fits it.** The 40-question benchmark result above used
+  `return_audio=False` (text-out only, since that's all the benchmark
+  scores) -- real audio OUTPUT for a live conversational deployment was
+  a separate, still-open question until validated here.
+
+  A single T4 (`g4dn.xlarge`) was confirmed, via a real Gemini-free
+  sanity script (seeded LoCoMo turns directly into STM/LTM to isolate
+  GPU behavior from Gemini's own reliability, see below), to
+  genuinely NOT have enough headroom for `return_audio=True` at
+  realistic full-conversation context length -- not a tuning problem:
+  cutting the context budget (stm_window 5->3, top_k 5->3) fixed the
+  audio ENCODER's OOM but simply exposed a second, separate ~2GB fixed
+  overhead in the token2wav VOCODER that doesn't shrink with less
+  context. Model weights + text generation alone already use ~12.7GB of
+  the T4's 14.56GB usable, leaving too little room for both stages
+  together regardless of context size.
+
+  Moving to a `g5.xlarge` (A10G, 24GB) fixed this with zero code
+  changes and zero context-budget cuts: the exact settings that OOM'd
+  on the T4 (stm_window=5, top_k=5, full 60-turn context) ran cleanly,
+  VRAM barely moving (11.98GB->12.17GB, more than half the card still
+  free). Confirmed with a real live 3-turn conversation via
+  `process_turn()` (not the benchmark's read-only `answer_question()`):
+  turn 1 "My favorite color is blue" -> turn 2 unrelated filler -> turn
+  3 "What is my favorite color?" got the real spoken reply "Your
+  favorite color is blue." -- real TTS input, real Gemini extraction,
+  real vector retrieval, real Qwen2.5-Omni audio output, zero OOM,
+  VRAM flat at ~12.2GB throughout.
+
+  Separately, a real Gemini outage was hit and independently confirmed
+  (direct curl calls bypassing this project's own code entirely showed
+  503/504 errors, and 1 of 3 raw calls timed out completely) while
+  building the diagnostic scripts above -- not a quota/credits issue
+  (that's a distinctly different 429 RESOURCE_EXHAUSTED error this
+  codebase already handles separately), just real transient instability
+  on Google's side that has since cleared. Worked around for the
+  diagnostic scripts specifically by bypassing `ingest_text_turn()`'s
+  Gemini-dependent `extract_memories()` call and writing raw turns
+  directly into `HippoMemory` via `_add_memory()` -- valid for isolating
+  GPU/memory behavior specifically, not a replacement for real
+  extraction (the live 3-turn demo above uses real Gemini extraction,
+  since only 3 calls were needed there and real extraction quality is
+  the point of that demo).
+
+  One real, unrelated bug caught along the way: `HippoAudioPipeline`'s
+  `_maybe_decay()` reads `self.llm`, a lazy PROPERTY that instantiates a
+  completely different local model (`llm.client.LLMClient`, 4-bit via
+  `bitsandbytes`) when `self._llm` is `None` -- not just "stays None" as
+  the raw attribute name would suggest. Surfaced as a `bitsandbytes`
+  `PackageNotFoundError` on an AMI that doesn't have it installed, when
+  a diagnostic script naively called `_maybe_decay()` after passing
+  `llm_client=None`. Not a real-world issue (real callers always pass a
+  real `llm_client`), but a real surprise worth knowing about this
+  pipeline's `None`-handling if extending it further.
+
 ## Open — carried over from earlier session (context.md)
 
 - Header table in `colab.ipynb` says Qwen3-4B, but the "Load LLM" cell
