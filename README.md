@@ -23,6 +23,8 @@ category-branched, not a rough approximation of it):
 | HippoVoice | **27.74%** | 10 | 1540 (10 conversations, all QA pairs) |
 | Mem0-style | 23.4% | 5 | 1540 (10 conversations, all QA pairs) |
 | A-MEM-style | 22.0% | 5 | 1540 (10 conversations, all QA pairs) |
+| Zep-style | queued | — | — |
+| NaiveRAG | queued | — | — |
 
 HippoVoice's original run (24.1%) finished 2026-07-11; Mem0-style's finished
 2026-08-31; A-MEM-style finished 2026-08-31 as well. HippoVoice's number was
@@ -38,9 +40,23 @@ have only ever been run at `top_k=5` — bumping HippoVoice's own retrieval
 budget to 10 was deliberately *not* applied as the shared harness default,
 specifically so it wouldn't silently make this table apples-to-oranges (see
 `scripts/run_full_locomo.py`'s comments). Re-running both baselines at
-`top_k=10` for a fully fair comparison is still open. NaiveRAG is also still
-queued at all — check [BUGS.md](BUGS.md) for what's actually confirmed
-versus what's pending.
+`top_k=10` for a fully fair comparison is still open. NaiveRAG is still
+queued too — check [BUGS.md](BUGS.md) for what's actually confirmed versus
+what's pending.
+
+**Zep-style** is a new local reimplementation of Graphiti's core algorithm
+(entity/fact-triple extraction into a temporal knowledge graph, with
+deterministic edge invalidation on contradiction and hybrid
+semantic+BM25+graph-distance retrieval via Reciprocal Rank Fusion — see
+`baselines/zep_baseline.py`'s docstring for exactly what's faithfully
+reproduced versus simplified). It exists specifically because Zep's own
+published LoCoMo numbers aren't usable for a direct comparison here: Zep
+reported ~84%, Mem0's own replication of Zep scored it at 58.44% and
+alleged methodology errors, and Zep rebutted with 75.14% — three different
+numbers for the same system, depending entirely on who measured it and how.
+Same problem as Mem0/A-MEM: different LLM (GPT-4-class), different scoring
+(LLM-as-judge, not strict token-F1). Running it through this project's own
+identical harness is the only way to compare it fairly against HippoVoice.
 
 There's also a smaller, synthetic benchmark (~90-100 turn conversations)
 for noise contamination: what fraction of retrieved context is actually
@@ -143,7 +159,7 @@ memory/
   decay.py                     Forgetting/compression cycle
   retriever.py                 HippoRAG-style graph-walk retrieval + reranking
   extractor.py                 LLM-based turn -> typed memory extraction
-baselines/                     Mem0-style, A-MEM-style, NaiveRAG, ROME/MEMIT weight-editing
+baselines/                     Mem0-style, A-MEM-style, NaiveRAG, Zep-style, ROME/MEMIT weight-editing
 benchmarks/locomo/             Real LoCoMo dataset loading + F1 scoring + eval harness
 colab.ipynb                    Track 1 GPU runner (LoCoMo, signal/noise, baselines)
 colab_track2.ipynb             Track 2 exploratory pass (memory capture, pre-conditioning)
