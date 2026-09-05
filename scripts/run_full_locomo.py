@@ -6,22 +6,29 @@ run. Progress checkpoints to disk after every conversation (see
 benchmarks/locomo/evaluate.py::run_locomo), so re-running this script after
 an interruption resumes instead of starting over.
 
-Supports running any of the four systems (HippoVoice + the three local
-baseline reimplementations) through the *real*, F1-scored LoCoMo QA
-benchmark under the identical LLM/data/scoring -- not just the separate
-synthetic signal/noise benchmark. This is what makes a comparison against
-Mem0/A-MEM/NaiveRAG fair: their own published numbers use a different LLM
-(usually GPT-4-class) and often a different, more lenient scoring
-methodology (LLM-as-judge, not LoCoMo's own strict token-F1), so comparing
-our number directly against theirs would conflate the memory architecture
-with the underlying model and the yardstick. Running all four through this
-exact same harness isolates the one variable that actually matters here.
+Supports running any of the five systems (HippoVoice + four local baseline
+reimplementations) through the *real*, F1-scored LoCoMo QA benchmark under
+the identical LLM/data/scoring -- not just the separate synthetic
+signal/noise benchmark. This is what makes a comparison against
+Mem0/A-MEM/NaiveRAG/Zep fair: their own published numbers use a different
+LLM (usually GPT-4-class) and almost always a different, more lenient
+scoring methodology (LLM-as-judge, not LoCoMo's own strict token-F1) --
+confirmed as a real, disputed problem in this exact space, not a
+theoretical concern: Zep's own team reported ~84% on LoCoMo, Mem0's
+replication of Zep under its own methodology scored it at 58.44%, and Zep
+rebutted with 75.14% -- three different numbers for the same system,
+depending entirely on who measured it and how. Comparing our number
+directly against any published figure would conflate the memory
+architecture with the underlying model AND the yardstick. Running all five
+through this exact same harness isolates the one variable that actually
+matters here.
 
 Usage:
     nohup python scripts/run_full_locomo.py --system hippovoice > run_hippovoice.log 2>&1 &
     nohup python scripts/run_full_locomo.py --system mem0       > run_mem0.log 2>&1 &
     nohup python scripts/run_full_locomo.py --system amem       > run_amem.log 2>&1 &
     nohup python scripts/run_full_locomo.py --system naive      > run_naive.log 2>&1 &
+    nohup python scripts/run_full_locomo.py --system zep        > run_zep.log 2>&1 &
     tail -f run_hippovoice.log
 
 Run these one at a time (they share the same GPU) -- queue them with `&&`
@@ -96,6 +103,11 @@ def _naive_factory(llm):
     return p
 
 
+def _zep_factory(llm):
+    from baselines.zep_baseline import ZepBaseline
+    return ZepBaseline(llm_client=llm)
+
+
 # None (the second element) means "use run_locomo's own default factory",
 # i.e. real HippoVoicePipeline construction with the values above -- kept
 # as None rather than duplicating that logic here.
@@ -104,6 +116,7 @@ SYSTEMS = {
     "mem0": ("Mem0-style", _mem0_factory),
     "amem": ("AMem-style", _amem_factory),
     "naive": ("NaiveRAG", _naive_factory),
+    "zep": ("Zep-style", _zep_factory),
 }
 
 
@@ -113,8 +126,12 @@ def sanity_check(llm) -> None:
     run -- same probe used throughout this project's development to catch
     extraction regressions (junk pollution, under-extraction, dropped
     dates) early. Exits before the real run if anything looks wrong.
-    Only meaningful for systems that use memory/extractor.py -- HippoVoice
-    and the two LLM-backed baselines all do, so this always applies.
+    Only meaningful for systems that use memory/extractor.py's own
+    extraction prompt -- HippoVoice and the Mem0-style/A-MEM-style
+    baselines all do. Zep-style has its own, different extraction prompt
+    (entities + fact triples, not typed fragments) and gets its own check
+    below -- this one would silently pass without ever exercising Zep's
+    actual prompt, which isn't the same as confirming it works.
     """
     print("=== Extraction sanity check ===")
     ok = True
@@ -145,6 +162,51 @@ def sanity_check(llm) -> None:
     print("Sanity check passed.\n")
 
 
+def zep_sanity_check(llm) -> None:
+    """
+    Zep-style's own pre-flight check -- exercises its actual extraction
+    prompt (entities + fact triples), not memory/extractor.py's, and
+    confirms the specific mechanics its retrieval depends on: entity
+    resolution (same name -> same entity across turns) and edge
+    invalidation (a contradicting fact supersedes the old one). A broken
+    prompt here would otherwise only surface after hours of GPU time spent
+    on a full run silently extracting nothing useful.
+    """
+    from baselines.zep_baseline import ZepBaseline
+
+    print("=== Zep-style extraction sanity check ===")
+    baseline = ZepBaseline(llm_client=llm)
+    ok = True
+
+    result = baseline._extract("Caroline: Thanks, Mel!")
+    print(f"  junk turn -> {result}")
+    if result.get("entities") or result.get("facts"):
+        ok = False
+
+    result = baseline._extract("My best friend Sarah moved to Chicago last year.")
+    print(f"  signal turn -> {result}")
+    if not result.get("entities") or not result.get("facts"):
+        ok = False
+
+    # Real ingest, not just raw extraction -- confirms entity resolution and
+    # edge invalidation actually work end to end, not just that the LLM
+    # returns well-formed JSON.
+    baseline.ingest_text_turn("Caroline lives in Seattle.")
+    baseline.ingest_text_turn("Caroline moved to Portland.")
+    caroline_ids = {eid for eid, name in baseline._entity_names.items() if name.lower() == "caroline"}
+    live_facts = [f for f in baseline._facts.values() if f["invalid_at"] is None]
+    print(f"  entities after 2 turns about the same person: {len(caroline_ids)} (want 1)")
+    print(f"  live facts after a contradiction: {len(live_facts)} (want 1, the newer one)")
+    if len(caroline_ids) != 1 or len(live_facts) != 1:
+        ok = False
+
+    if not ok:
+        print("\nZEP SANITY CHECK FAILED -- stopping before spending GPU time on the full run.")
+        sys.exit(1)
+
+    print("Zep sanity check passed.\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -162,7 +224,10 @@ def main() -> None:
     llm = LLMClient(model_name="Qwen/Qwen3-4B", load_in_4bit=True)
     print(f"Loaded: {llm.model_name}  backend: {llm._backend}\n")
 
-    sanity_check(llm)
+    if args.system == "zep":
+        zep_sanity_check(llm)
+    else:
+        sanity_check(llm)
 
     print(f"Running FULL LoCoMo benchmark for {system_name} (10 conversations, all QA pairs)...\n")
     kwargs = dict(
