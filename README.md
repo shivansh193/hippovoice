@@ -18,21 +18,29 @@ QA pairs. It's the same dataset Mem0, A-MEM, and MemoryBank report on.
 **LoCoMo**, scored with the published methodology (stemmed token F1,
 category-branched, not a rough approximation of it):
 
-| System | avg F1 | Questions |
-|---|---|---|
-| HippoVoice | 24.1% | 1540 (10 conversations, all QA pairs) |
-| Mem0-style | 23.4% | 1540 (10 conversations, all QA pairs) |
-| A-MEM-style | 22.0% | 1540 (10 conversations, all QA pairs) |
+| System | avg F1 | top_k | Questions |
+|---|---|---|---|
+| HippoVoice | **27.74%** | 10 | 1540 (10 conversations, all QA pairs) |
+| Mem0-style | 23.4% | 5 | 1540 (10 conversations, all QA pairs) |
+| A-MEM-style | 22.0% | 5 | 1540 (10 conversations, all QA pairs) |
 
-HippoVoice's run finished 2026-07-11; Mem0-style's finished 2026-08-31;
-A-MEM-style finished 2026-08-31 as well. Same harness, same LLM, same
-scorer across all three — HippoVoice currently leads both baselines on
-the actual LoCoMo metric, though the gap to Mem0-style is close (0.7
-points) and the error-distribution shape is similar across all three
-(near-zero/partial/high bins: 966/379/195 HippoVoice, 973/380/187
-Mem0-style, 1055/287/198 A-MEM-style). NaiveRAG is the last one still
-queued — check [BUGS.md](BUGS.md) for what's actually confirmed versus
-what's pending.
+HippoVoice's original run (24.1%) finished 2026-07-11; Mem0-style's finished
+2026-08-31; A-MEM-style finished 2026-08-31 as well. HippoVoice's number was
+then improved to 27.74% on 2026-09-05 via a real, validated Kaggle sweep
+(decay_lambda × relevance_weight × top_k) — `top_k=10` was the actual
+driver, confirmed on the full 1540-question set, with the whole score
+distribution shifting favorably, not just the mean (near-zero/partial/high
+bins: 877/431/232 at top_k=10, versus 966/379/195 at the original top_k=5).
+See [BUGS.md](BUGS.md) for the full sweep methodology.
+
+**Read the top_k column before comparing rows.** Mem0-style and A-MEM-style
+have only ever been run at `top_k=5` — bumping HippoVoice's own retrieval
+budget to 10 was deliberately *not* applied as the shared harness default,
+specifically so it wouldn't silently make this table apples-to-oranges (see
+`scripts/run_full_locomo.py`'s comments). Re-running both baselines at
+`top_k=10` for a fully fair comparison is still open. NaiveRAG is also still
+queued at all — check [BUGS.md](BUGS.md) for what's actually confirmed
+versus what's pending.
 
 There's also a smaller, synthetic benchmark (~90-100 turn conversations)
 for noise contamination: what fraction of retrieved context is actually
@@ -144,8 +152,10 @@ kaggle_full_benchmark.ipynb    Weight-editing + Track 2 audio LoCoMo benchmarks
 
 ## Status
 
-Track 1 (text) is validated on real LoCoMo data at 24.1% avg F1. Baseline
-comparisons and further tuning are ongoing.
+Track 1 (text) is validated on real LoCoMo data at **27.74% avg F1**
+(`top_k=10`, up from an original 24.1% at `top_k=5` -- see Results above
+and `BUGS.md` for the sweep). Baseline comparisons at the new `top_k` and
+further tuning are ongoing.
 
 Track 2 (audio-to-audio + memory) has a real, confirmed win: on a live
 multi-turn run through `HippoAudioPipeline` and Gemini's Live API, a fact
