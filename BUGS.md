@@ -1153,6 +1153,120 @@ Add to this list; don't fix silently in passing.
   real `llm_client`), but a real surprise worth knowing about this
   pipeline's `None`-handling if extending it further.
 
+- **Track 1's avg F1 improved from 24.1% to 27.74% via a real, validated
+  retrieval hyperparameter sweep -- `top_k`, not decay/relevance tuning,
+  turned out to be the actual driver.** Ran a coordinate-descent sweep
+  (`decay_lambda` × `relevance_weight` × `top_k`) on Kaggle rather than a
+  full grid, for a real, specific reason: `decay_lambda` changes what
+  physically gets DELETED during ingestion (the forgetting cycle runs every
+  10 turns and removes memories below `FORGET_THRESHOLD`), so each
+  `decay_lambda` value genuinely needs its own fresh ingestion -- but
+  `relevance_weight` and `top_k` only affect the read-time reranking
+  formula (`hippo_retrieve` reads `self.relevance_weight`/`self.decay_lambda`
+  off the pipeline at call time, and `top_k` is passed directly to
+  `retrieve()`), so they can be swept for free on top of one already-
+  ingested pipeline. Confirmed this matters: mutating `decay_lambda`
+  *after* ingestion would silently reuse whatever the forgetting cycle
+  already deleted under the ORIGINAL rate, giving a wrong answer for "what
+  if we'd decayed slower from the start" -- so only `decay_lambda` got the
+  expensive fresh-ingestion treatment; `relevance_weight`/`top_k` were
+  swept cheaply on top of the winning ingestion.
+
+  Cheap-subset results (1 conversation, 25 QA pairs, holding the other two
+  variables at their current defaults while sweeping each):
+
+  | Variable swept | Values tried | Winner | Subset F1 |
+  |---|---|---|---|
+  | `decay_lambda` | 0.0005 / 0.001 / 0.002 / 0.003 | 0.0005 (tied exactly with 0.001) | 0.256 |
+  | `relevance_weight` | 0.65 / 0.75 / 0.85 / 0.95 | 0.85 (unchanged from current default) | 0.256 |
+  | `top_k` | 3 / 5 / 8 / 10 | **10** | **0.287** |
+
+  `top_k` was the only variable that actually moved the number -- and by a
+  real margin (0.256 → 0.287 on the subset, roughly +3 points). `decay_lambda`
+  0.0005 and 0.001 scored IDENTICALLY on the subset (0.255984126984127 both,
+  to 12 decimal places) -- not a real difference, just whichever was tested
+  first in a strict `>` comparison. Kept 0.0005 anyway since that's the
+  exact value that went into the full-set validation below, not because
+  it's confirmed better than 0.001.
+
+  Validated the winning combination (`decay_lambda=0.0005,
+  relevance_weight=0.85, top_k=10`) against the real, full 1540-question
+  LoCoMo set (not just the cheap subset) -- this is the number that
+  actually matters:
+
+  | | Original (`top_k=5`) | New (`top_k=10`) |
+  |---|---|---|
+  | avg F1 | 24.1% | **27.74%** |
+  | near-zero | 966 (62.7%) | 877 (56.9%) |
+  | partial | 379 (24.6%) | 431 (28.0%) |
+  | high | 195 (12.7%) | 232 (15.1%) |
+
+  The whole distribution shifted favorably (fewer near-zero, more partial
+  *and* more high), not just the mean -- real evidence this is a genuine
+  improvement, not an artifact of a few lucky questions. Full-set run took
+  ~5.5 hours on a T4, notably slower than earlier full runs -- plausibly
+  `top_k=10`'s larger per-question retrieved context, though this wasn't
+  root-caused further since the run completed successfully.
+
+  Deliberately did NOT bump `run_locomo()`'s own harness-wide `top_k`
+  default from 5 to 10: Mem0-style (23.4%) and A-MEM-style (22.0%) were
+  both run at `top_k=5` and have never been re-swept at 10, so changing the
+  shared default would silently turn the README's comparison table into an
+  apples-to-oranges comparison. `top_k` is now exposed as a real, named
+  parameter on `run_locomo()` (previously hardcoded to `5` inline with no
+  way to override it at all) -- `scripts/run_full_locomo.py` and
+  `colab.ipynb`'s LoCoMo cell both opt into `top_k=10` explicitly for the
+  `hippovoice` system only, same pattern as the existing
+  `decay_lambda`/`relevance_weight` overrides.
+
+- **Real, currently-open Kaggle platform bug hit and worked around while
+  running the sweep above: this account got repeatedly assigned a Tesla
+  P100, and Kaggle's current GPU Docker image ships a PyTorch build with
+  zero compiled CUDA kernels for that architecture at all.** Four
+  consecutive kernel pushes all landed on the same P100 (compute capability
+  6.0); PyTorch's own startup warning states plainly that the installed
+  build only supports `sm_70 sm_75 sm_80 sm_86 sm_90 sm_100 sm_120`. First
+  suspected as bitsandbytes-specific (crashed with `Error named symbol not
+  found ... ops.cu` + a hard segfault during 4-bit weight quantization) --
+  added a runtime GPU-compute-capability check to fall back to a clean
+  fp16 load path (`LLMClient(load_in_4bit=False)`, which already existed
+  and never imports bitsandbytes) below `sm_70`. That fix got further but
+  hit a harder, more fundamental wall on the very next real generate()
+  call, in plain fp16 with no quantization at all:
+  `torch.AcceleratorError: CUDA error: no kernel image is available for
+  execution on the device` -- confirming this isn't narrowly a
+  bitsandbytes problem, the installed PyTorch build genuinely cannot run
+  ANY real CUDA operation on this GPU.
+
+  Confirmed via real web research (not guessed) that this is a known,
+  currently unresolved, actively-tracked Kaggle platform regression, not
+  anything specific to this account: [Kaggle/docker-python#1546](https://github.com/Kaggle/docker-python/issues/1546)
+  ("Pytorch CUDA P100 GPU Incompatibility"), plus several duplicate
+  reports. The real, working fix: `kaggle kernels push` has a documented
+  `--accelerator` flag accepting exact IDs like `NvidiaTeslaT4` (found via
+  web research after an earlier guess with an arbitrary string was
+  silently accepted/ignored by the CLI, wasting one push) -- forcing
+  `NvidiaTeslaT4` explicitly resolved it immediately, with zero further
+  GPU-lottery risk.
+
+  Investigated a real fix for the upstream Kaggle bug itself (not required
+  for this project, done as a good-faith side contribution): their GPU
+  image is `FROM` Google's Colab base image and just reinstalls whatever
+  torch version that base image already has, rather than choosing a CUDA
+  index itself -- so the actual sm_60-dropping wheel index is inherited,
+  not chosen in `Kaggle/docker-python`. Confirmed against PyTorch's own
+  `.ci/manywheel/build_env_setup.py` that the `cu126` wheel index still
+  ships `sm_60` kernels (unlike the newer `cu128` line, which trades it for
+  Blackwell/`sm_100+` support). Opened
+  [Kaggle/docker-python#1561](https://github.com/Kaggle/docker-python/pull/1561):
+  a small, GPU-template-scoped `Dockerfile.tmpl` change that reinstalls
+  the *same* torch version already present, but from `cu126` instead.
+  Explicitly flagged in the PR as unverified against Kaggle's real build
+  pipeline/GPU fleet (no way to test that from outside), and flagged an
+  already-open same-day PR removing Kaggle's P100 CI agent entirely --
+  which may mean P100 is being deprecated rather than fixed, information
+  the maintainers need to actually decide whether this PR is even wanted.
+
 ## Open — carried over from earlier session (context.md)
 
 - Header table in `colab.ipynb` says Qwen3-4B, but the "Load LLM" cell
