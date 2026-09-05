@@ -182,6 +182,7 @@ def run_locomo(
     batch_size: int = 50,
     decay_lambda: float = 0.001,
     relevance_weight: float = 0.85,
+    top_k: int = 5,
     pipeline_factory=None,
     system_name: str | None = None,
 ) -> dict:
@@ -205,8 +206,14 @@ def run_locomo(
     even at 663 turns elapsed; relevance_weight=0.85 (up from the pipeline
     default of 0.65) leans on relevance to do more of the ranking work now
     that availability barely discriminates between memories any more.
-    These two only apply to the default HippoVoicePipeline construction --
-    ignored if `pipeline_factory` is given, since baselines don't accept them.
+    `top_k` controls how many memories are retrieved per question in the QA
+    loop below -- previously hardcoded to 5 inline with no way to override
+    it for tuning. Applies regardless of `pipeline_factory`, since every
+    system's QA loop calls `.retrieve(question, top_k=...)` the same way.
+
+    `decay_lambda`/`relevance_weight` only apply to the default
+    HippoVoicePipeline construction -- ignored if `pipeline_factory` is
+    given, since baselines don't accept them.
 
     `pipeline_factory`, if given, is a callable `(llm_client) -> pipeline`
     used instead of the default HippoVoicePipeline construction -- e.g.
@@ -326,6 +333,7 @@ def run_locomo(
         "include_adversarial": include_adversarial,
         "decay_lambda": decay_lambda,
         "relevance_weight": relevance_weight,
+        "top_k": top_k,
         "commit": _current_commit_hash(),
     }
 
@@ -408,7 +416,7 @@ def run_locomo(
                 continue
 
             if hasattr(conv_pipeline, "retrieve"):
-                retrieved = conv_pipeline.retrieve(question, top_k=5)
+                retrieved = conv_pipeline.retrieve(question, top_k=top_k)
                 context = build_qa_context(retrieved)
             else:
                 # Confirmed as a real crash on a live run: WeightEditBaseline
