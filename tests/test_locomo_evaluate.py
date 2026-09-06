@@ -15,6 +15,7 @@ from benchmarks.locomo.evaluate import (
     run_locomo,
     MULTI_HOP_CATEGORY,
     ADVERSARIAL_CATEGORY,
+    QA_SYSTEM_PROMPT,
 )
 
 
@@ -266,6 +267,51 @@ def test_qa_works_for_a_pipeline_with_no_retrieve_method(monkeypatch):
 
     assert result["total"] == 1
     assert result["details"][0]["retrieved_ids"] == []
+
+
+def test_qa_step_uses_the_shared_qa_system_prompt_not_a_hardcoded_inline_one(monkeypatch):
+    """Real, confirmed fix: category 3 (inferential 'would X likely...'
+    questions) scored worst of any category (16.6% avg F1) on a real run,
+    and 19% of its near-zero answers were the model hedging ("cannot be
+    determined from the context") instead of making the inference the
+    question asked for -- the old inline prompt said "using ONLY the
+    provided context", which the model was reading as "refuse to infer".
+    QA_SYSTEM_PROMPT was pulled out to a named constant specifically so this
+    test (and any future prompt work) has something concrete to check
+    against, instead of a string literal buried inline in the QA loop."""
+    import benchmarks.locomo.evaluate as evaluate_mod
+
+    fake_conv = {
+        "conversation": {
+            "session_1_date_time": "1 May, 2023",
+            "session_1": [{"dia_id": "D1:1", "speaker": "Alex", "text": "I got a new job."}],
+        },
+        "qa": [{"question": "Would Alex likely be happy about this?", "answer": "likely yes", "category": 3}],
+    }
+    monkeypatch.setattr(evaluate_mod, "load_locomo", lambda data_path=None: [fake_conv])
+
+    llm = _make_extraction_llm()
+    seen_systems = []
+
+    def _extraction_default(system, messages, max_tokens=512):
+        import json
+        turn_text = messages[-1]["content"].split("Turn: ", 1)[-1].strip()
+        return json.dumps([{"content": turn_text, "entity": "unknown", "type": "event"}])
+
+    def combined(system, messages, max_tokens=512):
+        content = messages[-1]["content"].lower()
+        if "context" in content and "question" in content:
+            seen_systems.append(system)
+            return "likely yes"
+        return _extraction_default(system, messages, max_tokens)
+
+    llm.generate.side_effect = combined
+
+    evaluate_mod.run_locomo(llm_client=llm, num_conversations=1, verbose=False)
+
+    assert seen_systems, "the QA step should have called generate() at least once"
+    assert seen_systems[0] == QA_SYSTEM_PROMPT
+    assert "infer" in QA_SYSTEM_PROMPT.lower() and "judgment" in QA_SYSTEM_PROMPT.lower()
 
 
 def test_max_turns_per_conversation_truncates_ingestion(monkeypatch):

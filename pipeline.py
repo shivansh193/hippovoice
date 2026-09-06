@@ -40,6 +40,38 @@ DECAY_EVERY = 10  # apply forgetting cycle every N turns
 SEMANTIC_TYPES = {"fact", "preference", "person"}
 EPISODIC_TYPES = {"event"}
 
+# ── near-duplicate episodic supersession: TRIED, REVERTED, real regression ──
+# Real problem this was meant to fix: the same recurring event gets restated
+# across a long conversation with DIFFERENT extracted dates each time --
+# "Jon lost his job on 20 January" / "9 April" / "9 July" all extracted as
+# separate episodic memories, none matching the real gold date (19 January),
+# so retrieval surfaces several competing near-duplicates with no signal for
+# which date the question actually wants. Real, confirmed contributor to
+# category-2 (temporal) being a weak scoring category.
+#
+# Tried: deleting an existing episodic memory whenever a new one's content
+# fell within a high cosine-similarity threshold of it (mirroring Zep-style's
+# own deterministic edge-invalidation-on-contradiction in
+# baselines/zep_baseline.py, applied to this pipeline's free-text episodic
+# store instead of a structured subject/predicate/object graph).
+#
+# Reverted: broke a real, existing test on the first real run --
+# test_decay_lambda_override_prevents_premature_forgetting_at_scale ingests
+# 400 short, structurally-templated-but-genuinely-distinct events ("the
+# weather was mild on day 0" / "day 1" / "day 2" / ...) and the dedup logic
+# collapsed them down to 54, treating each day's entry as a "restatement" of
+# the previous one. Confirmed the real problem: differing only in one token
+# (a date, or here a day number) is exactly what makes two sentences embed
+# close together via all-MiniLM-L6-v2 regardless of whether they describe
+# the same event restated or two genuinely independent ones -- pure
+# content-embedding similarity cannot reliably tell those apart, and this
+# isn't a contrived edge case, it's the same sentence shape as the actual
+# target problem. A real fix here would need something more structured than
+# raw text similarity (e.g. extracting an explicit subject+event-type
+# separate from the date, the way Zep-style's own subject/predicate/object
+# extraction does) -- left as a documented open problem, not shipped as a
+# fix that provably deletes real, distinct memories.
+
 
 class HippoVoicePipeline:
     """
