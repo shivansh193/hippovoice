@@ -28,6 +28,19 @@ VALID_LABELS = {"neutral", "joy", "sadness", "fear", "anger", "surprise", "disgu
 # turns that have a date prefix" and dropped everything else. All three
 # example shapes are load-bearing; confirmed by testing each omission
 # separately before landing here.
+#
+# Relative-time resolution instruction + example added after a real run
+# showed a distinct, separate gap in the fix above: it tells the model to
+# attach the prefix's OWN date to a fact, but never to do the arithmetic for
+# a RELATIVE time word inside the turn's own text. Confirmed as a real,
+# direct cause of specific category-2 (temporal) failures: "Jon went to
+# Paris yesterday" got stored with "yesterday" left in verbatim, so the
+# benchmark's own predicted answer to "When was Jon in Paris?" was
+# literally "yesterday" -- not a hallucination, a faithful readout of what
+# got stored. EXPERIMENTAL, not yet validated on a real run the way the
+# fix above was -- date arithmetic is a genuinely harder ask for a 4B model
+# than the direct date-carrying case, and needs real testing before trusting
+# it the same way.
 EXTRACTION_PROMPT = """\
 Extract any noteworthy facts, preferences, plans, or events mentioned in this turn.
 If it's just a greeting, thanks, or acknowledgment with nothing else in it, return an empty array.
@@ -35,6 +48,12 @@ If the turn starts with a date/time (e.g. "[1:56 pm on 8 May, 2023]"), include t
 the content for every fact extracted from it -- this applies to feelings and opinions just
 as much as concrete events. Most turns won't have a date prefix at all -- extract from those
 exactly as normal, with no date to add.
+
+If the turn itself uses a RELATIVE time word ("yesterday", "tomorrow", "last week", "next
+month") together with a date/time prefix, calculate the actual date from the prefix and
+include that calculated date instead of the relative word -- never leave "yesterday" or
+similar words in the extracted content, since a later reader has no way to know what they
+were relative to.
 
 Return ONLY a JSON array — no prose, no markdown fences.
 Schema: [{{"content": "...", "entity": "...", "type": "fact|preference|event|person"}}]
@@ -50,6 +69,9 @@ Example output: [{{"content": "User went on a trip to Rome on 3 March, 2023", "e
 
 Example input: [2 pm on 12 June, 2023] I'm so relieved and grateful for my friends' support this week.
 Example output: [{{"content": "User felt relieved and grateful for friends' support on 12 June, 2023", "entity": "user", "type": "preference"}}]
+
+Example input: [9 am on 29 January, 2023] I went to Paris yesterday, it was amazing.
+Example output: [{{"content": "User went to Paris on 28 January, 2023", "entity": "user", "type": "event"}}]
 
 Turn: {turn}"""
 

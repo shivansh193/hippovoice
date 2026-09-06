@@ -272,3 +272,33 @@ def test_semantic_pool_name_match_disambiguates_similarly_embedded_names():
         "exact name match on 'John' should win over a similarly-embedded "
         "'Jon' fact about the same general topic in the semantic store too"
     )
+
+
+# ── near-duplicate episodic supersession: tried, reverted, guarded ───────────
+# A same-session attempt at fixing category-2 (temporal) retrieval confusion
+# (multiple restatements of one event with different dates, e.g. "Jon lost
+# his job on 20 January" / "9 April" / "9 July") by deleting existing
+# episodic memories whenever new content fell within a high cosine-
+# similarity threshold. Reverted: it broke
+# test_decay_lambda_override_prevents_premature_forgetting_at_scale, which
+# ingests 400 short, structurally-templated-but-genuinely-distinct events
+# ("the weather was mild on day 0" / "day 1" / ...) -- the dedup logic
+# collapsed them to 54, confirming pure text-embedding similarity can't
+# reliably tell "restated with a corrected date" apart from "a different
+# event that happens to share a sentence template" (see pipeline.py's own
+# comment above SEMANTIC_TYPES/EPISODIC_TYPES for the full story). This test
+# exists so that fix doesn't quietly come back without someone re-confirming
+# it doesn't reproduce this exact regression.
+
+def test_structurally_similar_but_distinct_episodic_memories_all_survive():
+    pipe = HippoVoicePipeline(llm_client=_make_llm(memory_type="event"), text_only=True)
+    texts = [f"the weather was mild on day {i}" for i in range(20)]
+    for t in texts:
+        pipe.ingest_text_turn(t)
+
+    assert pipe.episodic_memory.count() == len(texts), (
+        "genuinely distinct events that happen to share a sentence template "
+        "(differing only in one token, like a day number or a date) must "
+        "all survive ingestion -- no similarity-based deduplication should "
+        "be deleting them as if they were restatements of the same event"
+    )
