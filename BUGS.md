@@ -1267,6 +1267,109 @@ Add to this list; don't fix silently in passing.
   which may mean P100 is being deprecated rather than fixed, information
   the maintainers need to actually decide whether this PR is even wanted.
 
+- **Root-caused three distinct, separately-attributable failure patterns
+  behind the confirmed 27.74% avg F1 result -- not one generic "retrieval
+  is bad" problem.** Downloaded the full per-question `details` (all 1540
+  entries, including the actual retrieved `context` string per question --
+  logged specifically so this kind of analysis doesn't need a fresh run)
+  from the official top_k=10 confirmation run and analyzed it directly:
+  F1 broken down by category, and for near-zero questions, how much of the
+  gold answer's own tokens were actually present in what got retrieved.
+
+  Finding: only 39% of near-zero failures were genuine retrieval misses
+  (gold answer never in context at all). The other 61% had the gold
+  answer partially (49%) or even fully (10%) sitting right there in
+  context, and the model still scored near-zero -- meaning generation-side
+  and extraction-side problems account for more of the failure budget than
+  a pure "retrieval isn't finding the right memory" story would suggest.
+  Two of these turned out to be cheap, well-scoped fixes; one turned out to
+  be genuinely hard and got reverted after real testing (see the three
+  entries below).
+
+  Category breakdown (out of 1540 questions): category 1 (multi-hop, n=282)
+  22.2% avg F1; category 2 (temporal, n=321) 26.4%; category 3 (inferential
+  "would X likely...", n=96) **16.6% -- worst category by a wide margin**;
+  category 4 (largest bucket, n=841, mostly single-fact lookups) 31.4% avg
+  but the most total near-zero questions (470) by raw count.
+
+- **Fixed: category 3's hedging problem, a real QA-prompt gap, not a
+  retrieval problem at all.** 19% of category 3's near-zero answers were
+  the model outright refusing to infer -- "the context does not explicitly
+  state... therefore cannot be determined" -- scoring 0.044 avg F1, versus
+  0.194 for answers that actually attempted the inference the question
+  asked for (LoCoMo's own gold answers for this category are judgment
+  calls like "likely no" or "yes, since she collects...", not verbatim
+  quotes). Category 3 answers were also the longest of any category (13.7
+  words avg vs 6.9 for category 2) despite the prompt saying "be concise".
+  Root cause: the QA system prompt said "Answer the question using ONLY
+  the provided context" -- read by the model as "if it isn't stated
+  verbatim, refuse." Pulled the inline prompt out to a named
+  `QA_SYSTEM_PROMPT` constant in `benchmarks/locomo/evaluate.py` with
+  explicit permission to infer for judgment-style questions specifically,
+  while keeping plain factual questions grounded in what's stated (not
+  loosening context-grounding everywhere, which would risk trading
+  category 3's hedging for hallucination on categories that were already
+  fine on plain recall). Unit-tested (confirms the QA loop actually uses
+  the named constant, and that the constant itself contains the inference-
+  permitting language) but not yet validated on a real run.
+
+- **Fixed: unresolved relative-time words stored verbatim in extracted
+  memory content, a real, direct cause of specific category-2 failures.**
+  Real example found in the actual logged context: "Jon went to Paris
+  yesterday" got extracted and stored with "yesterday" left in as-is, so
+  the benchmark's own predicted answer to "When was Jon in Paris?" was
+  literally `"yesterday."` -- not a hallucination, a faithful readout of
+  what got stored. Root cause: `memory/extractor.py`'s `EXTRACTION_PROMPT`
+  already teaches attaching a turn's own date/time prefix to a fact
+  (fixed in an earlier session), but never teaches resolving a RELATIVE
+  time word inside the turn's own text against that prefix -- it handles
+  "just got back from X" (implicitly "on this date") but not "X
+  yesterday" (which needs actual subtract-one-day arithmetic). Added an
+  explicit instruction plus one worked example (prefix "29 January, 2023"
+  + "went to Paris yesterday" -> resolved to "28 January, 2023").
+  EXPERIMENTAL relative to the fix above: date arithmetic is a genuinely
+  harder ask for a 4B model than direct date-attachment was, and hasn't
+  been validated on a real run yet either.
+
+- **Tried and reverted: near-duplicate episodic memory supersession at
+  storage time -- broke a real, existing test on the first attempt.**
+  Third category-2 contributor found in the analysis: the same recurring
+  event gets restated across a long conversation with DIFFERENT extracted
+  dates each time -- real example: "Jon lost his job on 20 January" / "9
+  April" / "9 July" all stored as three separate episodic memories, none
+  matching the real gold date (19 January) -- so retrieval surfaces
+  several competing near-duplicates together with no signal for which
+  date the question actually wants.
+
+  Tried: at `_add_memory` time, deleting an existing episodic memory
+  whenever new content fell within a high cosine-similarity threshold of
+  it (`NEAR_DUPLICATE_DISTANCE_THRESHOLD`), mirroring Zep-style's own
+  deterministic edge-invalidation-on-contradiction (see
+  `baselines/zep_baseline.py`) applied to this pipeline's free-text
+  episodic store instead of a structured subject/predicate/object graph.
+
+  Reverted immediately on the first local test run:
+  `test_decay_lambda_override_prevents_premature_forgetting_at_scale`
+  ingests 400 short, structurally-templated-but-genuinely-distinct events
+  ("the weather was mild on day 0" / "day 1" / "day 2" / ...), and the
+  dedup logic collapsed them down to 54 -- treating each day's entry as a
+  "restatement" of the previous one. This confirmed the real problem, not
+  a contrived one: differing by exactly one token (a date, or here a day
+  number) is precisely what makes two sentences embed close together via
+  all-MiniLM-L6-v2, regardless of whether they're a genuine restatement or
+  two entirely independent events sharing a sentence template -- the same
+  sentence shape as the actual target problem (Jon's job-loss restatements
+  also differ by exactly one token: the date). Pure content-embedding
+  similarity cannot reliably tell these apart. A real fix here would need
+  something more structured than raw text similarity -- e.g. extracting an
+  explicit subject + event-type separate from the date, the way Zep-
+  style's own subject/predicate/object extraction already does -- left as
+  a documented open problem rather than shipped as a fix that provably
+  deletes real, distinct memories. Reverted with a regression-guard test
+  (`test_structurally_similar_but_distinct_episodic_memories_all_survive`)
+  so it can't quietly come back without someone re-confirming it doesn't
+  reproduce this exact failure.
+
 ## Open — carried over from earlier session (context.md)
 
 - Header table in `colab.ipynb` says Qwen3-4B, but the "Load LLM" cell
