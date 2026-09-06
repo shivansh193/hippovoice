@@ -161,6 +161,7 @@ memory/
   extractor.py                 LLM-based turn -> typed memory extraction
 baselines/                     Mem0-style, A-MEM-style, NaiveRAG, Zep-style, ROME/MEMIT weight-editing
 benchmarks/locomo/             Real LoCoMo dataset loading + F1 scoring + eval harness
+demo/track2_app.py             Interactive Gradio demo for Track 2 (mic in -> memory -> spoken reply)
 colab.ipynb                    Track 1 GPU runner (LoCoMo, signal/noise, baselines)
 colab_track2.ipynb             Track 2 exploratory pass (memory capture, pre-conditioning)
 kaggle_full_benchmark.ipynb    Weight-editing + Track 2 audio LoCoMo benchmarks
@@ -201,6 +202,17 @@ benchmarked as an alternative to retrieval-based memory. Worth reading
 `baselines/weight_edit_baseline.py`'s docstring before assuming it'll
 compete: it's expected to degrade at LoCoMo's scale, and that's a real
 result worth having, not a failure of the benchmark.
+
+An interactive demo of Track 2 lives in `demo/track2_app.py` -- a Gradio
+app that drives `HippoAudioPipeline` live: speak a turn into a mic,
+watch what memory gets retrieved and injected as context (a transparency
+panel most benchmark runs never expose), and hear the spoken reply.
+Defaults to `MockAudioToAudioModel` (zero GPU, validates the whole
+STT -> retrieve -> respond -> extract -> store loop for free); set
+`HIPPOVOICE_DEMO_BACKEND=qwen` before launch to drive it with the real,
+already-confirmed Qwen2.5-Omni-3B backend instead (needs a GPU and the
+extra install listed in `qwen_omni_audio_model.py`). Run with
+`python demo/track2_app.py`.
 
 Every number above traces back to an actual run logged in `BUGS.md`.
 Nothing here is projected or aspirational.

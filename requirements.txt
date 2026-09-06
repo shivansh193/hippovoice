@@ -21,6 +21,12 @@ pyttsx3>=2.90  # offline TTS used by tts/model.py -- was only ever ad-hoc
 google-genai>=2.20.0  # Gemini Live API client, used by gemini_live_model.py
                        # (Track 2's audio-to-audio backend -- API-based, no
                        # self-hosted GPU needed since we never edit its weights)
+gradio>=4.0.0          # demo/track2_app.py's interactive UI
+openai-whisper>=20231117  # whisper-tiny STT for demo/track2_app.py -- runs
+                          # on CPU, needed for both the mock and real (qwen)
+                          # demo backends since HippoAudioPipeline takes
+                          # user_text as an explicit param it doesn't derive
+                          # from audio itself (see pipeline_audio2audio.py)
 # NeMo ASR — install separately on Colab:
 # pip install nemo_toolkit[asr]
 # Fish TTS — install separately on Colab:
