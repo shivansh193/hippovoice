@@ -270,15 +270,16 @@ def test_qa_works_for_a_pipeline_with_no_retrieve_method(monkeypatch):
 
 
 def test_qa_step_uses_the_shared_qa_system_prompt_not_a_hardcoded_inline_one(monkeypatch):
-    """Real, confirmed fix: category 3 (inferential 'would X likely...'
-    questions) scored worst of any category (16.6% avg F1) on a real run,
-    and 19% of its near-zero answers were the model hedging ("cannot be
-    determined from the context") instead of making the inference the
-    question asked for -- the old inline prompt said "using ONLY the
-    provided context", which the model was reading as "refuse to infer".
-    QA_SYSTEM_PROMPT was pulled out to a named constant specifically so this
-    test (and any future prompt work) has something concrete to check
-    against, instead of a string literal buried inline in the QA loop."""
+    """QA_SYSTEM_PROMPT was pulled out of the QA loop into a named constant
+    while investigating category 3 (inferential 'would X likely...'
+    questions, worst-scoring category on a real run at 16.6% avg F1) so
+    prompt changes have something concrete to check against instead of a
+    string literal buried inline. An inference-permission variant of the
+    prompt was tried and validated against the real 96 category-3
+    questions -- it made things measurably worse (0.166 -> 0.118 avg F1,
+    more hedging not less) and was reverted; see BUGS.md. This test only
+    guards the refactor (shared constant, not a hardcoded inline string),
+    not any particular prompt content."""
     import benchmarks.locomo.evaluate as evaluate_mod
 
     fake_conv = {
@@ -311,7 +312,6 @@ def test_qa_step_uses_the_shared_qa_system_prompt_not_a_hardcoded_inline_one(mon
 
     assert seen_systems, "the QA step should have called generate() at least once"
     assert seen_systems[0] == QA_SYSTEM_PROMPT
-    assert "infer" in QA_SYSTEM_PROMPT.lower() and "judgment" in QA_SYSTEM_PROMPT.lower()
 
 
 def test_max_turns_per_conversation_truncates_ingestion(monkeypatch):

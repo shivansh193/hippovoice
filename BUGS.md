@@ -1282,9 +1282,13 @@ Add to this list; don't fix silently in passing.
   context, and the model still scored near-zero -- meaning generation-side
   and extraction-side problems account for more of the failure budget than
   a pure "retrieval isn't finding the right memory" story would suggest.
-  Two of these turned out to be cheap, well-scoped fixes; one turned out to
-  be genuinely hard and got reverted after real testing (see the three
-  entries below).
+  All three looked like cheap, well-scoped fixes going in; on real testing
+  all three were reverted -- two made things measurably worse or provided
+  no measurable benefit (see the two entries below), one broke an existing
+  test outright (see the third entry below). Category 3's hedging problem
+  and category 2's relative-date gap are both still real, confirmed, and
+  unfixed -- this analysis is left here as a documented starting point for
+  whoever picks it up next, not as closed work.
 
   Category breakdown (out of 1540 questions): category 1 (multi-hop, n=282)
   22.2% avg F1; category 2 (temporal, n=321) 26.4%; category 3 (inferential
@@ -1292,8 +1296,8 @@ Add to this list; don't fix silently in passing.
   category 4 (largest bucket, n=841, mostly single-fact lookups) 31.4% avg
   but the most total near-zero questions (470) by raw count.
 
-- **Fixed: category 3's hedging problem, a real QA-prompt gap, not a
-  retrieval problem at all.** 19% of category 3's near-zero answers were
+- **Tried and reverted: category 3's hedging fix made F1 worse, not
+  better, on real validation.** 19% of category 3's near-zero answers were
   the model outright refusing to infer -- "the context does not explicitly
   state... therefore cannot be determined" -- scoring 0.044 avg F1, versus
   0.194 for answers that actually attempted the inference the question
@@ -1301,35 +1305,67 @@ Add to this list; don't fix silently in passing.
   calls like "likely no" or "yes, since she collects...", not verbatim
   quotes). Category 3 answers were also the longest of any category (13.7
   words avg vs 6.9 for category 2) despite the prompt saying "be concise".
-  Root cause: the QA system prompt said "Answer the question using ONLY
-  the provided context" -- read by the model as "if it isn't stated
-  verbatim, refuse." Pulled the inline prompt out to a named
+  Hypothesized root cause: the QA system prompt said "Answer the question
+  using ONLY the provided context" -- read by the model as "if it isn't
+  stated verbatim, refuse." Pulled the inline prompt out to a named
   `QA_SYSTEM_PROMPT` constant in `benchmarks/locomo/evaluate.py` with
   explicit permission to infer for judgment-style questions specifically,
-  while keeping plain factual questions grounded in what's stated (not
-  loosening context-grounding everywhere, which would risk trading
-  category 3's hedging for hallucination on categories that were already
-  fine on plain recall). Unit-tested (confirms the QA loop actually uses
-  the named constant, and that the constant itself contains the inference-
-  permitting language) but not yet validated on a real run.
+  while keeping plain factual questions grounded in what's stated.
 
-- **Fixed: unresolved relative-time words stored verbatim in extracted
-  memory content, a real, direct cause of specific category-2 failures.**
-  Real example found in the actual logged context: "Jon went to Paris
+  Validated on a cheap, targeted Kaggle run (T4, `Qwen/Qwen3-4B`) against
+  the real 96 category-3 questions, reusing their already-logged retrieved
+  context so only the QA step itself was retested: the new prompt scored
+  **worse**, 0.118 avg F1 vs. the original's 0.166, and hedging went **up**
+  (23% vs. 19%) despite the entire point being to reduce it. Spot-checking
+  the actual generations showed the new prompt did make the model attempt
+  more inferences instead of refusing outright -- but the attempted
+  inferences were often longer and drifted further from the gold phrasing
+  (e.g. gold `"likely no"` vs. new prompt's `"no, since caroline mentioned
+  that counseling and support groups improved her life and that her
+  support system..."`), costing more stemmed-token F1 than the hedging
+  it fixed. Reverted `QA_SYSTEM_PROMPT` to the original wording; category
+  3's real problem (worst-scoring category by a wide margin) is still
+  unfixed. One caveat on this validation: the "old" numbers are the
+  original production run's logged predictions (not regenerated in this
+  same session), so some of the gap could in principle be sampling
+  variance rather than purely the prompt -- but the hedge-rate move in the
+  wrong direction, on the prompt's own stated goal, is hard to explain as
+  noise alone.
+
+- **Tried and reverted: relative-time-word resolution in extraction did
+  not resolve a single real case on validation, and regressed one.** Real
+  example found in the actual logged context: "Jon went to Paris
   yesterday" got extracted and stored with "yesterday" left in as-is, so
   the benchmark's own predicted answer to "When was Jon in Paris?" was
   literally `"yesterday."` -- not a hallucination, a faithful readout of
-  what got stored. Root cause: `memory/extractor.py`'s `EXTRACTION_PROMPT`
-  already teaches attaching a turn's own date/time prefix to a fact
-  (fixed in an earlier session), but never teaches resolving a RELATIVE
-  time word inside the turn's own text against that prefix -- it handles
-  "just got back from X" (implicitly "on this date") but not "X
-  yesterday" (which needs actual subtract-one-day arithmetic). Added an
-  explicit instruction plus one worked example (prefix "29 January, 2023"
-  + "went to Paris yesterday" -> resolved to "28 January, 2023").
-  EXPERIMENTAL relative to the fix above: date arithmetic is a genuinely
-  harder ask for a 4B model than direct date-attachment was, and hasn't
-  been validated on a real run yet either.
+  what got stored. Hypothesized root cause: `memory/extractor.py`'s
+  `EXTRACTION_PROMPT` already teaches attaching a turn's own date/time
+  prefix to a fact (fixed in an earlier session), but never teaches
+  resolving a RELATIVE time word inside the turn's own text against that
+  prefix. Added an explicit instruction plus one worked example (prefix
+  "29 January, 2023" + "went to Paris yesterday" -> resolved to "28
+  January, 2023").
+
+  Validated on the same Kaggle run against 6 real relative-time turns
+  pulled live from the actual LoCoMo dataset (containing "yesterday",
+  "last week", or "next month" alongside a date prefix), regenerating
+  both the old and new extraction prompts back-to-back in the same
+  session for a clean comparison (no old-run/new-run confound here, unlike
+  the fix above). Result: the new prompt resolved **zero** of the five
+  cases the old prompt didn't already handle -- most turns describing
+  ongoing or future plans ("next month") were correctly left unresolved by
+  both (there is no fixed date to resolve to), and most past-tense "last
+  week" turns were left with "last week" still literally in the output by
+  *both* prompts. Worse, on one turn the new prompt actively regressed:
+  instead of summarizing ("Melanie and Caroline have been friends for 5
+  years", what the old prompt produced), it dumped the entire raw turn
+  text verbatim as the extracted "content", relative-time word and all.
+  Reverted `EXTRACTION_PROMPT` to the original wording. Category 2's
+  relative-date gap is real and confirmed, but resolving prose-relative
+  dates via prompt instruction alone was apparently too hard an ask for
+  Qwen3-4B -- a real fix would likely need either a bigger model for
+  extraction specifically, or a deterministic post-processing pass (regex
+  + date arithmetic) rather than relying on the LLM to do the subtraction.
 
 - **Tried and reverted: near-duplicate episodic memory supersession at
   storage time -- broke a real, existing test on the first attempt.**
