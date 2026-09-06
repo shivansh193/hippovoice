@@ -16,6 +16,7 @@ from benchmarks.locomo.evaluate import (
     MULTI_HOP_CATEGORY,
     ADVERSARIAL_CATEGORY,
     QA_SYSTEM_PROMPT,
+    CATEGORY_4_QA_SYSTEM_PROMPT,
 )
 
 
@@ -312,6 +313,66 @@ def test_qa_step_uses_the_shared_qa_system_prompt_not_a_hardcoded_inline_one(mon
 
     assert seen_systems, "the QA step should have called generate() at least once"
     assert seen_systems[0] == QA_SYSTEM_PROMPT
+
+
+def test_qa_step_uses_the_category_4_terse_prompt_only_for_category_4(monkeypatch):
+    """Real, confirmed fix: category 4 (mostly single-fact lookups) is 55%
+    of the whole benchmark (841/1540) and had the worst answer-length ratio
+    of any category (predictions 2.38x longer than gold) even though
+    QA_SYSTEM_PROMPT already asks abstractly for conciseness. Validated on
+    a controlled, same-session run (both prompts regenerated fresh against
+    an identical 260-question stratified sample) that showing the target
+    terse format via few-shot examples actually works: predicted length
+    dropped 12.6 -> 3.5 words and F1 rose 0.181 -> 0.209. Scoped to
+    category 4 only -- the same run showed a real regression on
+    already-correct answers (top F1 bucket 0.962 -> 0.840), and no other
+    category has been validated against this prompt. See BUGS.md."""
+    import benchmarks.locomo.evaluate as evaluate_mod
+
+    fake_conv = {
+        "conversation": {
+            "session_1_date_time": "1 May, 2023",
+            "session_1": [
+                {"dia_id": "D1:1", "speaker": "Alex", "text": "I got a new job."},
+                {"dia_id": "D1:2", "speaker": "Alex", "text": "I'm moving to Boston next month."},
+            ],
+        },
+        "qa": [
+            {"question": "What city is Alex moving to?", "answer": "boston", "category": 4},
+            {"question": "Would Alex likely be happy about this?", "answer": "likely yes", "category": 3},
+        ],
+    }
+    monkeypatch.setattr(evaluate_mod, "load_locomo", lambda data_path=None: [fake_conv])
+
+    llm = _make_extraction_llm()
+    seen_by_category = {}
+
+    def _extraction_default(system, messages, max_tokens=512):
+        import json
+        turn_text = messages[-1]["content"].split("Turn: ", 1)[-1].strip()
+        return json.dumps([{"content": turn_text, "entity": "unknown", "type": "event"}])
+
+    def combined(system, messages, max_tokens=512):
+        content = messages[-1]["content"].lower()
+        if "question: what city is alex moving to?" in content:
+            seen_by_category[4] = system
+            return "boston"
+        if "question: would alex likely be happy about this?" in content:
+            seen_by_category[3] = system
+            return "likely yes"
+        return _extraction_default(system, messages, max_tokens)
+
+    llm.generate.side_effect = combined
+
+    evaluate_mod.run_locomo(llm_client=llm, num_conversations=1, verbose=False)
+
+    assert seen_by_category.get(4) == CATEGORY_4_QA_SYSTEM_PROMPT, (
+        "category 4 questions should use the validated terse prompt"
+    )
+    assert seen_by_category.get(3) == QA_SYSTEM_PROMPT, (
+        "other categories should still use the original shared prompt, "
+        "unchanged and unvalidated against the terse variant"
+    )
 
 
 def test_max_turns_per_conversation_truncates_ingestion(monkeypatch):

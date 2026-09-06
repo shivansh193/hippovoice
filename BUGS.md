@@ -1406,6 +1406,93 @@ Add to this list; don't fix silently in passing.
   so it can't quietly come back without someone re-confirming it doesn't
   reproduce this exact failure.
 
+- **Fixed: category 4's answer-verbosity problem, validated with a real
+  F1 gain -- scoped to category 4 only, not shipped globally.** After the
+  category 2/3 investigation above, root-caused category 4 next: it's the
+  largest LoCoMo category by far (841/1540 -- 55% of the whole benchmark)
+  and, on the confirmed 27.74% run, had the worst answer-length ratio of
+  any category -- predictions averaged **2.38x** longer than gold (12.6
+  vs. 4.8 words), worse than category 1 (1.68x), category 2 (2.06x), or
+  category 3 (2.09x) -- even though `QA_SYSTEM_PROMPT` already asks
+  abstractly for conciseness ("be concise -- one sentence or less").
+  Near-zero breakdown: 47.3% genuine retrieval misses (gold never in
+  context -- the single biggest share of any category analyzed so far,
+  and a real, harder, separate problem left undone -- see below), 45.9%
+  partial-context, only 6.8% gold-fully-in-context-but-still-wrong.
+  Retrieval was never empty (0% of near-zero questions had zero retrieved
+  memories) -- the failures are about which memories got retrieved and how
+  they got answered, not a totally broken retrieval path.
+
+  Root cause on the generation side: describing conciseness abstractly
+  wasn't enough -- the model still defaulted to full explanatory sentences
+  ("caroline is excited about the adoption process because she views it
+  as a way of giving back...") instead of matching gold's terse phrase
+  style ("creating a family for kids who need one"). Added
+  `CATEGORY_4_QA_SYSTEM_PROMPT`, which keeps the same context-grounding
+  instruction but adds three few-shot examples *demonstrating* the target
+  terse shape (a short phrase or single word, no "because..." reasoning) --
+  the same principle already validated for `EXTRACTION_PROMPT` (a 4B model
+  follows a shown example far more reliably than an abstract rule).
+
+  Validated properly this time: both the original prompt and the new one
+  were regenerated fresh, back-to-back, in the same Kaggle session against
+  an identical 260-question sample stratified across category 4's real F1
+  distribution (150 near-zero / 40 low / 30 mid / 20 high / 20 already-
+  correct) -- no old-run/new-run confound, unlike the category-3
+  validation. Result: **0.181 -> 0.209 avg F1 (+15.5% relative)** on the
+  sample, with predicted length dropping from 12.6 to 3.5 words, confirming
+  the terseness instruction actually took effect. Per-bucket breakdown:
+
+  | bucket (orig. F1 range) | n   | OLD avg F1 | NEW avg F1 | delta   |
+  |--------------------------|-----|-----------|-----------|---------|
+  | near-zero (<0.05)        | 150 | 0.000     | 0.036     | +0.036  |
+  | low (0.05-0.25)          | 40  | 0.147     | 0.203     | +0.056  |
+  | mid (0.25-0.50)          | 30  | 0.331     | 0.330     | -0.001  |
+  | high (0.50-0.75)         | 20  | 0.595     | 0.709     | +0.114  |
+  | top (0.75-1.00)          | 20  | 0.962     | 0.840     | -0.122  |
+
+  Real, honest caveat: the "top" bucket regressed -- over-terseness
+  sometimes drops a qualifying word gold actually needed, on questions the
+  original prompt was already answering well. Weighting these deltas by
+  category 4's true bucket sizes in the full 841-question population
+  (339/164/99/71/168, not the sample's artificial stratification) gives an
+  estimated net category-4 gain of roughly **+0.010 avg F1**, and roughly
+  **+0.006** on the overall benchmark score given category 4 is 55% of it
+  -- a real, modest, positive effect, not a wash.
+
+  Deliberately scoped `CATEGORY_4_QA_SYSTEM_PROMPT` to `category == 4`
+  only in the QA loop rather than replacing the shared `QA_SYSTEM_PROMPT`
+  globally, for two reasons: (1) the top-bucket regression shows this
+  specific prompt isn't a strict improvement even within category 4 --
+  applying it to categories 1/2/3/5 without validating there first would
+  repeat exactly the mistake the category-3 QA-prompt revert already
+  taught (a prompt validated on one category's question shapes doesn't
+  automatically transfer); (2) category 3 in particular is known to be
+  unusually sensitive to QA-prompt wording changes. The 47.3% genuine-
+  retrieval-miss share for category 4 is left as a documented, real, and
+  harder open problem -- a generation-prompt fix can't recover an answer
+  that was never retrieved in the first place; that would need retrieval-
+  side work (embedding quality, hybrid search, chunk granularity), not
+  attempted this round given the size of that undertaking relative to the
+  time budget.
+
+## Open
+
+- **Category 4's genuine retrieval misses (47.3% of its near-zero
+  failures -- the largest such share of any category analyzed).** The
+  gold answer was never in the retrieved context at all for these, so no
+  QA-prompt fix (including the terse-answer fix above) can recover them --
+  this needs actual retrieval-side work: embedding model quality, hybrid
+  retrieval (the way `baselines/zep_baseline.py` already combines semantic
+  + BM25 + graph-distance via RRF, applied to the main pipeline instead of
+  just the baseline), or memory chunk/granularity changes. Not attempted
+  yet given the size of the undertaking relative to the time spent on the
+  cheaper category 2/3/4 generation-side fixes above.
+- Categories 1 (multi-hop, 22.2% avg F1) and 2's remaining relative-date
+  gap haven't had the same kind of dedicated root-cause pass category 4
+  just got -- category 1 in particular is unexamined beyond its aggregate
+  F1 number.
+
 ## Open — carried over from earlier session (context.md)
 
 - Header table in `colab.ipynb` says Qwen3-4B, but the "Load LLM" cell
