@@ -42,33 +42,22 @@ ADVERSARIAL_CATEGORY = 5
 # separator -- naively splitting those would fabricate two fake sub-answers.
 MULTI_HOP_CATEGORY = 1
 
-# Confirmed as a real, specific cause of category 3's own worst-in-class
-# score on a real full run (16.6% avg F1, vs 22-31% for every other
-# category): category 3 questions are explicitly inferential/judgment-call
-# questions ("Would X likely...", gold answers like "likely no" or "yes,
-# since she collects..."), but the original prompt below said "using ONLY
-# the provided context" -- which a real run showed the model reading as
-# "if it isn't stated verbatim, refuse to answer." 19% of category 3's
-# near-zero answers were exactly that: "the context does not explicitly
-# state... therefore cannot be determined" -- scoring 0.044 avg F1 (vs 0.194
-# for answers that actually attempted the inference the question asked for).
-# The instruction below explicitly permits inference for judgment-style
-# questions while keeping factual questions grounded in what's actually
-# there -- not fixing this by loosening context-grounding everywhere, which
-# would risk trading category 3's hedging problem for hallucination on the
-# categories that were already working fine on plain factual recall.
+# Tried an inference-permission variant of this prompt after category 3
+# (inferential "would X likely..." questions) came back as the worst-scoring
+# category on a real full run (16.6% avg F1) with 19% of its near-zero
+# answers being hedges ("cannot be determined from context"). The
+# hypothesis -- that "using ONLY the provided context" reads to the model
+# as "refuse to infer" -- was real, but the fix wasn't: validated on the
+# actual 96 category-3 questions (same context, same model, regenerated
+# fresh) it made things WORSE, not better -- 0.166 avg F1 dropped to 0.118,
+# and hedge rate went UP (19% to 23%) despite explicitly telling the model
+# to stop hedging. Reverted to this original prompt. See BUGS.md for the
+# full before/after data; a real fix for category 3 still needs finding.
 QA_SYSTEM_PROMPT = (
-    "Answer the question using the provided context. If the question asks "
-    "for a judgment, inference, or opinion about someone (e.g. 'would X "
-    "likely...', 'is X consistent with...', 'how would X feel about...'), "
-    "make a reasonable inference from what the context reveals about that "
-    "person, rather than refusing to answer just because it isn't stated "
-    "word-for-word -- LoCoMo's own gold answers for these are inferences "
-    "like 'likely no' or 'yes, since...', not verbatim quotes. For plain "
-    "factual questions, stick to what the context actually says. Give a "
-    "specific, direct answer (a name, label, date, yes/no with a brief "
-    "reason, or short phrase) rather than a hedge or a general description. "
-    "Be concise -- one sentence or less."
+    "Answer the question using only the provided context. "
+    "Give a specific, direct answer (a name, label, date, or "
+    "short phrase) rather than a general description. "
+    "Be concise — one sentence or less."
 )
 
 _ps = PorterStemmer()
