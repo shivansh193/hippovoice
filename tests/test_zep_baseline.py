@@ -221,3 +221,29 @@ def test_zep_ignores_turns_with_nothing_to_extract():
     baseline.ingest_text_turn("Thanks, see you later!")
 
     assert baseline.retrieve("anything", top_k=5) == []
+
+
+def test_zep_ingest_survives_explicit_null_fields_in_extraction_json():
+    """Real crash on a full Kaggle run, ~2 hours into conversation 1 (see
+    BUGS.md): the LLM's own extraction JSON set a fact field to an
+    EXPLICIT null rather than omitting the key. dict.get(key, default)
+    only falls back to default when the key is absent -- an explicit None
+    value passes through as-is, so the old `f.get("object", "").strip()`
+    crashed with AttributeError on real Qwen3-4B output. This turn should
+    be silently skipped (same as any other malformed/incomplete fact),
+    not crash the whole ingestion."""
+    llm = _extraction_llm({
+        "null object": {
+            "entities": [{"name": "Caroline", "type": "person"}],
+            "facts": [{"subject": "Caroline", "predicate": "lives in", "object": None, "time": None}],
+        },
+        "null subject": {
+            "entities": [{"name": None, "type": "person"}],
+            "facts": [{"subject": None, "predicate": "lives in", "object": "Seattle", "time": None}],
+        },
+    })
+    baseline = ZepBaseline(llm_client=llm)
+    baseline.ingest_text_turn("Caroline mentioned a null object")
+    baseline.ingest_text_turn("Someone mentioned a null subject")
+
+    assert baseline._facts == {}, "a fact with any explicitly-null required field should be skipped, not crash"

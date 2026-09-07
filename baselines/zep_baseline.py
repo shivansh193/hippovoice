@@ -165,14 +165,23 @@ class ZepBaseline:
         extracted = self._extract(text)
         entity_ids = {}
         for e in extracted.get("entities", []):
-            name = e.get("name", "").strip()
+            # Real, confirmed crash on a full Kaggle run (~2hrs into
+            # conversation 1 -- see BUGS.md): the LLM's own extraction JSON
+            # can set a field to an EXPLICIT null, not just omit the key.
+            # dict.get(key, default) only falls back to default when the
+            # key is ABSENT -- an explicit `None` value is returned as-is,
+            # so `.get("name", "").strip()` still crashes with
+            # AttributeError when the LLM emits `"name": null`.
+            # `(e.get("name") or "").strip()` treats both "missing" and
+            # "explicitly null" the same way.
+            name = (e.get("name") or "").strip()
             if name:
                 entity_ids[name] = self._resolve_entity(name)
 
         for f in extracted.get("facts", []):
-            subj_name = f.get("subject", "").strip()
-            pred = f.get("predicate", "").strip()
-            obj_name = f.get("object", "").strip()
+            subj_name = (f.get("subject") or "").strip()
+            pred = (f.get("predicate") or "").strip()
+            obj_name = (f.get("object") or "").strip()
             if not (subj_name and pred and obj_name):
                 continue
             subj_id = entity_ids.get(subj_name) or self._resolve_entity(subj_name)
