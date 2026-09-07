@@ -1489,22 +1489,77 @@ Add to this list; don't fix silently in passing.
   attempted this round given the size of that undertaking relative to the
   time budget.
 
+- **Fixed: category 4's genuine retrieval misses, via BM25 keyword-match
+  seeding.** The 47.3% genuine-retrieval-miss item directly above was
+  picked up as real retrieval-side work rather than left open. Added a
+  full-store BM25 scan (`_bm25_seed_ids` in `memory/retriever.py`) as a
+  second seeding path into `hippo_retrieve()`, structurally identical to
+  the existing `_name_match_ids` mechanism already solving the same class
+  of problem for proper nouns (the "Jon"/"John" disambiguation fix) --
+  generalized from exact name matches to any keyword/number/date overlap
+  via standard Okapi BM25. `BM25_MATCH_BONUS` deliberately reuses
+  `NAME_MATCH_BONUS`'s exact magnitude (0.3) rather than introducing a
+  second new free parameter alongside a new mechanism. Shared by both
+  `HippoVoicePipeline` and `HippoAudioPipeline`'s episodic retrieval (both
+  call the same `hippo_retrieve()`), so both tracks get this fix at once.
+  4 new tests, full suite clean. **Not yet confirmed with a real F1
+  measurement** -- unit-tested and logically sound (mirrors an
+  already-validated mechanism), but per this project's own standing
+  discipline (see the category-3/2 QA-prompt reverts above), a real
+  before/after LoCoMo run is still needed before trusting the size of the
+  effect, only the mechanism itself.
+
+- **Fixed: Zep-style edge invalidation missed contradictions phrased with
+  different predicates.** Caught by `zep_sanity_check` exactly as that
+  check is designed to -- before spending GPU time on a full run, not
+  after. Real Qwen3-4B extraction of "Caroline lives in Seattle" then
+  "Caroline moved to Portland" left both facts live (the sanity check
+  expects 1), because the deterministic invalidation rule required an
+  EXACT string match on predicate, and the LLM phrased the same
+  real-world update with two different verbs. The existing unit test
+  never caught this because its own mock happened to reuse the identical
+  predicate string for both turns. Fixed by comparing predicates on
+  embedding similarity instead of string equality -- checked the actual
+  threshold against real measured values rather than assuming
+  `ENTITY_RESOLUTION_THRESHOLD` (0.75) transfers to short verb phrases (it
+  doesn't: "lives in" vs "moved to" scores 0.604, "likes" vs "dislikes"
+  --should NOT invalidate-- scores 0.557, only a 0.033 gap from "likes"
+  vs "prefers" --should invalidate-- at 0.590). Set
+  `PREDICATE_SIMILARITY_THRESHOLD = 0.6`: clears the two confirmed real
+  cases this fixes with real margin above the highest confirmed
+  false-positive risk, at the honest, documented cost of still missing
+  some genuine updates phrased very differently -- a known limitation,
+  not a regression (those cases behave exactly as they did before this
+  fix). 2 new tests, full suite clean.
+
 ## Open
 
-- **Category 4's genuine retrieval misses (47.3% of its near-zero
-  failures -- the largest such share of any category analyzed).** The
-  gold answer was never in the retrieved context at all for these, so no
-  QA-prompt fix (including the terse-answer fix above) can recover them --
-  this needs actual retrieval-side work: embedding model quality, hybrid
-  retrieval (the way `baselines/zep_baseline.py` already combines semantic
-  + BM25 + graph-distance via RRF, applied to the main pipeline instead of
-  just the baseline), or memory chunk/granularity changes. Not attempted
-  yet given the size of the undertaking relative to the time spent on the
-  cheaper category 2/3/4 generation-side fixes above.
+- **Category 4's genuine retrieval misses -- BM25 seeding fix landed
+  (mechanism above), full-run confirmation still pending.** The mechanism
+  is real and unit-tested, but the actual F1 effect on the full 1540-
+  question set hasn't been measured yet -- next step is a full
+  `run_full_locomo.py --system hippovoice` confirmation run, the same way
+  `top_k=10` and the category-4 QA-prompt fix were each confirmed for
+  real before being trusted.
+- NaiveRAG and Zep-style's first full 1540-question runs, and Mem0-style/
+  A-MEM-style's re-runs at `top_k=10` for a fully matched comparison
+  (using the new `--top_k` flag on `run_full_locomo.py`), are in progress
+  on Kaggle as of this writing -- Kaggle's free tier caps concurrent GPU
+  kernels at 2, so these are queued two at a time rather than all four at
+  once. Results to be added here once they land.
+- Weight-editing (ROME/MEMIT) still needs wiring into
+  `scripts/run_full_locomo.py`'s `SYSTEMS` dict -- `kaggle_weightedit_only.
+  ipynb` has a real, separate setup for it (different base model, GPT-2
+  XL, not Qwen3-4B) that hasn't been checked yet for whether it plugs into
+  the shared harness as-is or needs its own runner.
 - Categories 1 (multi-hop, 22.2% avg F1) and 2's remaining relative-date
   gap haven't had the same kind of dedicated root-cause pass category 4
   just got -- category 1 in particular is unexamined beyond its aggregate
   F1 number.
+- Track 2 (audio) has never had the decay_lambda/relevance_weight/top_k
+  sweep Track 1 got, and its own 25.81% benchmark only covered 2 of
+  LoCoMo's 10 conversations -- scaling to the full set would make it
+  directly comparable to Track 1's baselines.
 
 ## Open — carried over from earlier session (context.md)
 
