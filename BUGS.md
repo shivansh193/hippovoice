@@ -1451,14 +1451,27 @@ Add to this list; don't fix silently in passing.
   | high (0.50-0.75)         | 20  | 0.595     | 0.709     | +0.114  |
   | top (0.75-1.00)          | 20  | 0.962     | 0.840     | -0.122  |
 
-  Real, honest caveat: the "top" bucket regressed -- over-terseness
-  sometimes drops a qualifying word gold actually needed, on questions the
-  original prompt was already answering well. Weighting these deltas by
-  category 4's true bucket sizes in the full 841-question population
-  (339/164/99/71/168, not the sample's artificial stratification) gives an
-  estimated net category-4 gain of roughly **+0.010 avg F1**, and roughly
-  **+0.006** on the overall benchmark score given category 4 is 55% of it
-  -- a real, modest, positive effect, not a wash.
+  Real, honest caveat from the sample validation: the "top" bucket
+  regressed -- over-terseness sometimes drops a qualifying word gold
+  actually needed, on questions the original prompt was already answering
+  well. Weighting the sample's deltas by category 4's true bucket sizes in
+  the full 841-question population projected a net category-4 gain of
+  roughly +0.010 avg F1 (+0.006 overall) -- a real but modest estimate.
+
+  **Confirmed on a full, official 1540-question run** (same production
+  entry point, `scripts/run_full_locomo.py --system hippovoice`, that
+  confirmed `top_k=10`): the real effect was notably larger than the
+  sample projected -- category 4 moved **0.3139 -> 0.3456 avg F1
+  (+3.16pp)**, overall **27.74% -> 29.47% (+1.73pp)**. Score-distribution
+  bins moved favorably too (near-zero/partial/high: 877/431/232 ->
+  852/410/278 -- fewer near-zero, fewer partial, more high-scoring
+  answers, not just a mean shift). Categories 1, 2, 3, and 5 reproduced
+  their exact prior F1 values bit-for-bit across the two independent full
+  runs (0.2216 / 0.2640 / 0.1660 / 0.0000, unchanged to 4 decimal places)
+  -- a clean, deterministic confirmation that `CATEGORY_4_QA_SYSTEM_PROMPT`
+  is fully isolated to category 4 with zero cross-category side effects,
+  not a coincidence given the underlying generation is greedy/deterministic
+  and every other category's prompt and inputs were untouched.
 
   Deliberately scoped `CATEGORY_4_QA_SYSTEM_PROMPT` to `category == 4`
   only in the QA loop rather than replacing the shared `QA_SYSTEM_PROMPT`
