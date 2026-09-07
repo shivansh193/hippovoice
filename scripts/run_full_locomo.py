@@ -213,6 +213,20 @@ def main() -> None:
         "--system", choices=sorted(SYSTEMS), default="hippovoice",
         help="Which system to run through the real LoCoMo QA benchmark.",
     )
+    # Added so baselines can be run at the SAME top_k HippoVoice was
+    # confirmed at (10), not just HippoVoice's own hardcoded TOP_K above --
+    # closes the exact "read the top_k column first" caveat in README:
+    # Mem0-style/A-MEM-style/NaiveRAG had only ever been run at the
+    # harness's old default of 5, making the results table not directly
+    # comparable until they're re-run here. Defaults to 10 (not 5) so a
+    # bare re-run of any baseline lines up with HippoVoice's own number
+    # without remembering to pass a flag every time.
+    parser.add_argument(
+        "--top_k", type=int, default=TOP_K,
+        help=f"Retrieval budget passed to every system uniformly (default "
+             f"{TOP_K}, matching HippoVoice's own confirmed setting -- pass "
+             f"5 to reproduce a baseline's original, older number instead).",
+    )
     args = parser.parse_args()
     system_name, factory = SYSTEMS[args.system]
 
@@ -220,6 +234,7 @@ def main() -> None:
     results_path = f"locomo_full_results_{args.system}.json"
 
     print(f"System under test: {system_name}")
+    print(f"top_k: {args.top_k}")
     print("Loading Qwen/Qwen3-4B (4-bit)...")
     llm = LLMClient(model_name="Qwen/Qwen3-4B", load_in_4bit=True)
     print(f"Loaded: {llm.model_name}  backend: {llm._backend}\n")
@@ -237,12 +252,17 @@ def main() -> None:
         checkpoint_path=checkpoint_path,
         verbose=True,
     )
+    # top_k applies uniformly to every system now (see --top_k above) --
+    # previously only the HippoVoice path got TOP_K=10 at all, which was
+    # correct for not silently changing baselines' already-recorded numbers,
+    # but also meant there was no easy way to re-run a baseline at the same
+    # top_k for a fair comparison without editing this file by hand.
+    kwargs["top_k"] = args.top_k
     if factory is None:
         # Default HippoVoice path -- let run_locomo apply DECAY_LAMBDA/
-        # RELEVANCE_WEIGHT/TOP_K itself rather than duplicating the values here.
+        # RELEVANCE_WEIGHT itself rather than duplicating the values here.
         kwargs["decay_lambda"] = DECAY_LAMBDA
         kwargs["relevance_weight"] = RELEVANCE_WEIGHT
-        kwargs["top_k"] = TOP_K
     else:
         kwargs["pipeline_factory"] = factory
         kwargs["system_name"] = system_name
