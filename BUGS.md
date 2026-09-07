@@ -1508,8 +1508,19 @@ Add to this list; don't fix silently in passing.
 
 ## Open — carried over from earlier session (context.md)
 
-- Header table in `colab.ipynb` says Qwen3-4B, but the "Load LLM" cell
-  defaults to Qwen3-0.6B (`llm = LLMClient()`). Need to decide which one is
-  actually intended and match the two.
-- Track 2 (audio-space memory) is entirely unbuilt.
-- `benchmarks/longmemeval/` doesn't exist yet.
+- **Resolved, stale note removed:** this used to say `colab.ipynb`'s header
+  table claimed Qwen3-4B while the "Load LLM" cell's bare `LLMClient()`
+  defaulted to Qwen3-0.6B. Checked directly against the current code
+  (`llm/client.py`): `LLMClient.__init__`'s own default is now
+  `"Qwen/Qwen3-4B"` (and `"mlx-community/Qwen3-4B-4bit"` on the MLX path) --
+  the two already match, nothing to fix.
+- **Resolved, stale note removed:** this used to say Track 2 (audio-space
+  memory) was entirely unbuilt. It's since been built end to end --
+  `pipeline_audio2audio.py`, a confirmed live audio-in/audio-out recall
+  demo on a real GPU, a 40-question text-out LoCoMo benchmark (25.81% avg
+  F1), and an interactive Gradio demo (`demo/track2_app.py`) verified live
+  against the real Qwen2.5-Omni backend. See README's Status section and
+  the chapters above for the real trail.
+- `benchmarks/longmemeval/` still doesn't exist -- genuinely still open, a
+  second long-term-memory benchmark dataset beyond LoCoMo that nothing in
+  this project has started on yet.
