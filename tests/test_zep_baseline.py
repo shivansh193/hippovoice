@@ -107,6 +107,66 @@ def test_zep_edge_invalidation_on_contradiction():
     assert any("portland" in c for c in contents)
 
 
+def test_zep_edge_invalidation_survives_differently_worded_predicates():
+    """Real, confirmed gap found via an actual Kaggle sanity-check failure
+    against real Qwen3-4B extraction (not a hypothetical): the invalidation
+    rule originally required an EXACT string match on predicate, so
+    'Caroline lives in Seattle' -> 'Caroline moved to Portland' left BOTH
+    facts live, since the LLM phrased the same real update with two
+    different verbs ('lives in' vs 'moved to'). The existing
+    test_zep_edge_invalidation_on_contradiction test above never caught
+    this because its own mock happens to reuse the identical predicate
+    string for both turns -- this test deliberately uses two different,
+    real predicate phrasings for the same relationship, relying on the
+    real (CPU) embedder to judge them as similar enough to invalidate."""
+    llm = _extraction_llm({
+        "lives in Seattle": {
+            "entities": [{"name": "Caroline", "type": "person"}],
+            "facts": [{"subject": "Caroline", "predicate": "lives in", "object": "Seattle", "time": None}],
+        },
+        "moved to Portland": {
+            "entities": [{"name": "Caroline", "type": "person"}],
+            "facts": [{"subject": "Caroline", "predicate": "moved to", "object": "Portland", "time": None}],
+        },
+    })
+    baseline = ZepBaseline(llm_client=llm)
+    baseline.ingest_text_turn("Caroline lives in Seattle")
+    baseline.ingest_text_turn("Caroline moved to Portland")
+
+    live_facts = [f for f in baseline._facts.values() if f["invalid_at"] is None]
+    assert len(live_facts) == 1, (
+        "differently-worded predicates for the same real-world update "
+        "('lives in' vs 'moved to') should still invalidate the old fact"
+    )
+    assert "portland" in live_facts[0]["content"].lower()
+
+
+def test_zep_edge_invalidation_does_not_fire_on_unrelated_predicates():
+    """The embedding-similarity predicate match must not become so loose
+    that it invalidates genuinely unrelated facts about the same subject
+    -- e.g. a new fact about Caroline's job shouldn't invalidate an
+    existing fact about where she lives."""
+    llm = _extraction_llm({
+        "lives in Seattle": {
+            "entities": [{"name": "Caroline", "type": "person"}],
+            "facts": [{"subject": "Caroline", "predicate": "lives in", "object": "Seattle", "time": None}],
+        },
+        "works as a nurse": {
+            "entities": [{"name": "Caroline", "type": "person"}],
+            "facts": [{"subject": "Caroline", "predicate": "works as", "object": "a nurse", "time": None}],
+        },
+    })
+    baseline = ZepBaseline(llm_client=llm)
+    baseline.ingest_text_turn("Caroline lives in Seattle")
+    baseline.ingest_text_turn("Caroline works as a nurse")
+
+    live_facts = [f for f in baseline._facts.values() if f["invalid_at"] is None]
+    assert len(live_facts) == 2, (
+        "an unrelated fact (job) about the same subject should not "
+        "invalidate an existing, still-true fact (location)"
+    )
+
+
 def test_zep_retrieve_excludes_invalidated_facts_even_with_exact_keyword_match():
     """Even a query that lexically matches the OLD (invalidated) fact's
     wording exactly should not surface it -- retrieve() must filter by

@@ -89,6 +89,37 @@ EXTRACTION_SYSTEM_PROMPT = "You are a knowledge graph extraction assistant. Outp
 # a fourth arbitrary constant.
 ENTITY_RESOLUTION_THRESHOLD = 0.75
 
+# Real, confirmed cause of a real sanity-check failure against Qwen3-4B
+# extraction, not a hypothetical: the original invalidation rule required
+# an EXACT string match on predicate to detect a contradiction --
+# "Caroline lives in Seattle" then "Caroline moved to Portland" left BOTH
+# facts live, since the LLM phrased the same real-world update ("where
+# Caroline lives") with two different verbs. An LLM's own extraction has
+# no obligation to reuse identical predicate wording for what is
+# semantically the same relationship being updated. Fixed by comparing
+# predicates on embedding similarity instead of string equality.
+#
+# NOT reusing ENTITY_RESOLUTION_THRESHOLD (0.75) -- checked directly
+# against real embedding values (all-MiniLM-L6-v2) rather than assuming
+# the same threshold transfers to short verb phrases the way it does to
+# entity names, and it doesn't:
+#   "lives in" vs "moved to"   (should invalidate)   -> 0.604
+#   "lives in" vs "resides in" (should invalidate)   -> 0.715
+#   "likes" vs "prefers"       (should invalidate)   -> 0.590
+#   "likes" vs "dislikes"      (should NOT invalidate)-> 0.557
+#   "lives in" vs "works as"   (should NOT invalidate)-> 0.230
+#   "is friends with" vs "works with" (should NOT)   -> 0.306
+# The gap between the highest "should not" (0.557) and lowest "should"
+# (0.590) is only 0.033 -- predicate embedding similarity alone cannot
+# cleanly separate every case. Set to 0.6: clears the two confirmed real
+# cases this was built to fix (0.604, 0.715) with a real margin above the
+# highest confirmed false-positive risk (0.557), at the honest cost of
+# still missing some genuine same-relationship updates phrased very
+# differently (e.g. "likes"/"prefers" at 0.590 falls just short) -- a
+# known limitation, not silently swept under the rug: those cases behave
+# exactly as they did before this fix (both facts stay live), not worse.
+PREDICATE_SIMILARITY_THRESHOLD = 0.6
+
 # Standard Okapi BM25 constants (Robertson/Sparck Jones) -- not tuned for
 # this dataset, since the paper doesn't report tuning them either.
 BM25_K1 = 1.5
@@ -194,13 +225,26 @@ class ZepBaseline:
 
     def _add_fact(self, subj_id: str, predicate: str, obj_id: str, time: str | None) -> None:
         # Deterministic invalidation rule (see module docstring): a new fact
-        # sharing (subject, predicate) with an existing live fact but naming
-        # a different object supersedes it.
+        # about the same subject, naming a different object, supersedes an
+        # existing live one -- IF the two predicates describe the same kind
+        # of relationship. That's an embedding-similarity check
+        # (PREDICATE_SIMILARITY_THRESHOLD), not exact string equality --
+        # see that constant's own comment for the real extraction case that
+        # required this.
+        predicate_emb = None
         for existing in self._facts.values():
-            if (existing["invalid_at"] is None
-                    and existing["subject"] == subj_id
-                    and existing["predicate"] == predicate
-                    and existing["object"] != obj_id):
+            if not (existing["invalid_at"] is None
+                     and existing["subject"] == subj_id
+                     and existing["object"] != obj_id):
+                continue
+            if existing["predicate"] == predicate:
+                same_relation = True
+            else:
+                if predicate_emb is None:
+                    predicate_emb = self.store.embedder.encode(predicate)
+                existing_pred_emb = self.store.embedder.encode(existing["predicate"])
+                same_relation = _cosine_similarity(predicate_emb, existing_pred_emb) >= PREDICATE_SIMILARITY_THRESHOLD
+            if same_relation:
                 existing["invalid_at"] = self.current_turn
 
         fact_id = str(uuid.uuid4())
