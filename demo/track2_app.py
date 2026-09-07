@@ -194,7 +194,14 @@ def _launch():
         )
         reset_btn.click(on_reset, outputs=[seed_status, log_box])
 
-    demo.launch()
+    # share=True gets a public *.gradio.live tunnel URL -- the practical
+    # way to hand a live link to someone when this app is running on a
+    # remote GPU instance (there's no other browser-reachable path to a
+    # box that isn't already exposing its own port). Off by default so a
+    # purely local run (the "mock" backend's normal use case) doesn't
+    # silently open a public tunnel nobody asked for.
+    share = os.environ.get("HIPPOVOICE_DEMO_SHARE", "0") == "1"
+    demo.launch(share=share, server_name="0.0.0.0" if share else "127.0.0.1")
 
 
 if __name__ == "__main__":
