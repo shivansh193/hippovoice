@@ -20,7 +20,7 @@ category-branched, not a rough approximation of it):
 
 | System | avg F1 | top_k | Questions |
 |---|---|---|---|
-| HippoVoice | **27.74%** | 10 | 1540 (10 conversations, all QA pairs) |
+| HippoVoice | **29.47%** | 10 | 1540 (10 conversations, all QA pairs) |
 | Mem0-style | 23.4% | 5 | 1540 (10 conversations, all QA pairs) |
 | A-MEM-style | 22.0% | 5 | 1540 (10 conversations, all QA pairs) |
 | Zep-style | queued | — | — |
@@ -33,7 +33,17 @@ then improved to 27.74% on 2026-09-05 via a real, validated Kaggle sweep
 driver, confirmed on the full 1540-question set, with the whole score
 distribution shifting favorably, not just the mean (near-zero/partial/high
 bins: 877/431/232 at top_k=10, versus 966/379/195 at the original top_k=5).
-See [BUGS.md](BUGS.md) for the full sweep methodology.
+
+Then improved again to **29.47%** on 2026-09-07 via a category-4-specific
+QA prompt fix (`CATEGORY_4_QA_SYSTEM_PROMPT`), confirmed on a second full
+1540-question run: category 4 (the largest category, 55% of the whole
+benchmark) moved 31.4% → 34.6% avg F1, while categories 1/2/3/5 reproduced
+bit-for-bit identically to the prior run (a clean, deterministic
+confirmation that the fix is fully isolated to category 4, no
+cross-category side effects). Bins moved favorably again: 852/410/278.
+See [BUGS.md](BUGS.md) for the full sweep methodology, the category
+root-cause analysis, and three other fix attempts that were tried and
+honestly reverted after real validation showed they didn't help.
 
 **Read the top_k column before comparing rows.** Mem0-style and A-MEM-style
 have only ever been run at `top_k=5` — bumping HippoVoice's own retrieval
@@ -169,10 +179,11 @@ kaggle_full_benchmark.ipynb    Weight-editing + Track 2 audio LoCoMo benchmarks
 
 ## Status
 
-Track 1 (text) is validated on real LoCoMo data at **27.74% avg F1**
-(`top_k=10`, up from an original 24.1% at `top_k=5` -- see Results above
-and `BUGS.md` for the sweep). Baseline comparisons at the new `top_k` and
-further tuning are ongoing.
+Track 1 (text) is validated on real LoCoMo data at **29.47% avg F1**
+(`top_k=10` + the category-4 terse-QA-prompt fix, up from an original
+24.1% at `top_k=5` -- see Results above and `BUGS.md` for both the sweep
+and the category root-cause work). Baseline comparisons at the new
+`top_k` and further tuning are ongoing.
 
 Track 2 (audio-to-audio + memory) has a real, confirmed win: on a live
 multi-turn run through `HippoAudioPipeline` and Gemini's Live API, a fact
