@@ -203,6 +203,84 @@ def test_name_match_guarantees_candidate_even_if_crowded_out_of_seed_pool():
     )
 
 
+def test_bm25_seed_ids_finds_exact_keyword_match():
+    # Pure unit test of the seeding function itself, no embeddings involved
+    # -- deterministic by construction. Confirmed as a real category-4
+    # failure cause (see BUGS.md): a memory sharing an exact rare keyword
+    # with the query but little else should score highest.
+    from memory.retriever import _bm25_seed_ids
+
+    mem = HippoMemory(collection_name="test_bm25_exact")
+    mem.add({
+        "content": "Maria started aerial yoga in December 2023",
+        "emotion": {"label": "neutral", "intensity": 0.1},
+        "base_weight": 1.0, "recall_count": 0, "turn_created": 0,
+    }, "target")
+    mem.add({
+        "content": "Sam went for a run around the block",
+        "emotion": {"label": "neutral", "intensity": 0.1},
+        "base_weight": 1.0, "recall_count": 0, "turn_created": 0,
+    }, "distractor")
+
+    ids = _bm25_seed_ids("What type of workout class did Maria start doing in December 2023?", mem)
+    assert "target" in ids
+    assert ids[0] == "target", "the exact keyword-overlapping memory should score highest"
+
+
+def test_bm25_seed_ids_excludes_zero_score_documents():
+    from memory.retriever import _bm25_seed_ids
+
+    mem = HippoMemory(collection_name="test_bm25_zero_score")
+    mem.add({
+        "content": "completely unrelated content about something else entirely",
+        "emotion": {"label": "neutral", "intensity": 0.1},
+        "base_weight": 1.0, "recall_count": 0, "turn_created": 0,
+    }, "unrelated")
+
+    ids = _bm25_seed_ids("aerial yoga December", mem)
+    assert ids == [], "a memory with zero query-term overlap should not be forced into the seed list"
+
+
+def test_bm25_seed_ids_empty_store():
+    from memory.retriever import _bm25_seed_ids
+    mem = HippoMemory(collection_name="test_bm25_empty")
+    assert _bm25_seed_ids("anything", mem) == []
+
+
+def test_bm25_match_guarantees_candidate_even_if_crowded_out_of_seed_pool():
+    # Mirrors test_name_match_guarantees_candidate_even_if_crowded_out_of_
+    # seed_pool exactly, but for an exact keyword instead of a proper noun:
+    # a memory whose phrasing shares almost nothing with the query beyond
+    # one rare, specific term must still be considered even when many
+    # topically-similar (workout-related) distractors dominate the raw
+    # embedding-similarity seed pool.
+    mem = HippoMemory(collection_name="test_bm25_pool")
+    graph = mem.graph
+
+    for i in range(20):
+        mem.add({
+            "content": f"Sam went to the gym for workout session number {i}",
+            "emotion": {"label": "neutral", "intensity": 0.1},
+            "base_weight": 1.0, "recall_count": 0, "turn_created": 0,
+        }, f"distractor_{i}")
+
+    mem.add({
+        "content": "Maria started aerial yoga in December 2023",
+        "emotion": {"label": "neutral", "intensity": 0.1},
+        "base_weight": 1.0, "recall_count": 0, "turn_created": 0,
+    }, "target")
+
+    results = hippo_retrieve(
+        "What type of workout class did Maria start doing in December 2023?",
+        mem, graph, current_turn=5, top_k=3,
+    )
+    assert any(r["id"] == "target" for r in results), (
+        "an exact keyword match (aerial yoga / December 2023) should be "
+        "considered even if crowded out of the raw embedding-similarity "
+        "seed pool by many topically-similar workout distractors"
+    )
+
+
 def test_extract_proper_nouns_excludes_question_words():
     from memory.retriever import _extract_proper_nouns
     names = _extract_proper_nouns("Which city have both Jean and John visited?")

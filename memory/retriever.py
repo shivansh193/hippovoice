@@ -50,6 +50,103 @@ def _name_match_ids(names: set[str], memory: HippoMemory) -> list[str]:
         return []
     return [m["id"] for m in memory.get_all() if _content_matches_names(m.get("content", ""), names)]
 
+
+# Real, confirmed cause of category 4 (mostly single-fact lookups, 55% of
+# the whole LoCoMo benchmark) having the largest genuine-retrieval-miss
+# share of any category analyzed: 47.3% of its near-zero answers had the
+# gold answer nowhere in retrieved context AT ALL, not a generation
+# problem. Root cause -- confirmed by pulling real failing examples, not
+# guessed: embedding similarity alone can miss an exact keyword, number,
+# or rare-term overlap when the rest of the memory's phrasing is
+# dissimilar to the question's phrasing. "What type of workout class did
+# Maria start doing in December 2023?" (gold "aerial yoga") is a real
+# example where the specific memory shares almost no phrasing with the
+# question beyond "aerial yoga" and "December 2023" themselves -- if that
+# memory doesn't happen to rank in the embedding-based seed pool, no
+# amount of reranking on that pool can recover it, the same structural gap
+# NAME_MATCH_BONUS above already exists to close for proper nouns
+# specifically. BM25_MATCH_BONUS generalizes that same fix from "exact
+# proper-noun match" to "exact keyword-overlap match" via a standard,
+# well-understood ranking function (Okapi BM25) instead of a bespoke
+# heuristic -- the same algorithm baselines/zep_baseline.py already uses
+# for its own hybrid retrieval, kept here as an independent inline copy
+# for the same reason pipeline_audio2audio.py keeps its own copy of
+# retrieve() rather than importing cross-module.
+BM25_K1 = 1.5
+BM25_B = 0.75
+
+# Deliberately the same magnitude as NAME_MATCH_BONUS rather than a newly-
+# tuned value -- introducing one more free parameter into an already-
+# validated scoring formula (decay_lambda x relevance_weight x top_k, see
+# BUGS.md's sweep) risks the same kind of unvalidated-interaction problem
+# that sank the category-3 QA-prompt attempt. Reusing an existing,
+# real-world-confirmed bonus size keeps this change to one new mechanism
+# (a second seeding path), not two (a seeding path AND a new weight to
+# separately tune).
+BM25_MATCH_BONUS = 0.3
+
+# How many of the top BM25-scoring memories (store-wide) get a chance to
+# enter the candidate pool. Small and bounded like graph_expand_seeds --
+# this is a recall mechanism (get a real keyword match INTO the pool at
+# all), not a ranking mechanism (the actual rank within the pool still
+# comes from the relevance/availability/bonus formula below).
+BM25_SEED_COUNT = 5
+
+_BM25_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _bm25_tokenize(text: str) -> list[str]:
+    return _BM25_TOKEN_RE.findall(text.lower())
+
+
+def _bm25_seed_ids(query: str, memory: HippoMemory, top_n: int = BM25_SEED_COUNT) -> list[str]:
+    """
+    Full-store BM25 scan, structurally identical to _name_match_ids's
+    full-store scan above but generalized past proper nouns to any
+    keyword overlap. Returns up to top_n memory ids with the highest BM25
+    score against the query, excluding zero-score results -- a BM25 score
+    of 0 means no query term appears in that memory at all, and forcing
+    zero-signal candidates into the pool just to fill a fixed count would
+    add noise, not recall.
+
+    O(n_memories x n_query_terms) plain-Python scoring, same cost shape
+    already accepted for _name_match_ids's own full-store scan -- no
+    embedding calls, so this stays cheap even though it touches every
+    memory in the store rather than a pre-filtered candidate pool (the
+    whole point: a memory that never made the embedding-based seed pool
+    still needs a path to be considered at all).
+    """
+    query_terms = _bm25_tokenize(query)
+    if not query_terms:
+        return []
+
+    all_memories = memory.get_all()
+    docs = {m["id"]: _bm25_tokenize(m.get("content", "")) for m in all_memories if "id" in m}
+    n_docs = len(docs)
+    if n_docs == 0:
+        return []
+    avgdl = sum(len(d) for d in docs.values()) / n_docs
+
+    df = {}
+    for term in set(query_terms):
+        df[term] = sum(1 for d in docs.values() if term in d)
+
+    scores = {}
+    for mid, doc in docs.items():
+        doc_len = len(doc) or 1
+        score = 0.0
+        for term in query_terms:
+            tf = doc.count(term)
+            if tf == 0:
+                continue
+            idf = math.log((n_docs - df[term] + 0.5) / (df[term] + 0.5) + 1)
+            score += idf * (tf * (BM25_K1 + 1)) / (tf + BM25_K1 * (1 - BM25_B + BM25_B * doc_len / avgdl))
+        if score > 0:
+            scores[mid] = score
+
+    ranked = sorted(scores, key=lambda mid: scores[mid], reverse=True)
+    return ranked[:top_n]
+
 # Log-space bounds for normalizing availability into [0, 1]. FORGET_THRESHOLD
 # is the existing boundary below which a memory is already being deleted by
 # the forgetting cycle, so it's the natural floor. ~4.0 is close to the
@@ -195,12 +292,21 @@ def hippo_retrieve(
     alone can't disambiguate similarly-spelled names. A full-store scan
     (_name_match_ids) guarantees such a candidate is considered even if it
     didn't make the embedding-based seed pool.
+
+    Same idea, generalized past proper nouns: BM25_MATCH_BONUS folds in a
+    full-store BM25 keyword scan (_bm25_seed_ids) so an exact keyword/
+    number/date overlap can pull a memory into the pool even when its
+    overall phrasing is dissimilar enough to the query that embedding
+    similarity alone left it out of the seed pool entirely -- see BUGS.md
+    for the real category-4 failure this was confirmed against.
     """
     query_names = _extract_proper_nouns(query)
     seed_ids = retrieve_seeds(query, memory, top_k=max(top_k * 4, 15))
     name_ids = _name_match_ids(query_names, memory)
+    bm25_ids = _bm25_seed_ids(query, memory)
     expanded_ids = expand_via_graph(seed_ids[:graph_expand_seeds], graph)
-    candidate_ids = list(dict.fromkeys(seed_ids + name_ids + expanded_ids))
+    candidate_ids = list(dict.fromkeys(seed_ids + name_ids + bm25_ids + expanded_ids))
+    bm25_id_set = set(bm25_ids)
 
     found = [(mid, memory.get_by_id(mid)) for mid in candidate_ids]
     found = [(mid, m) for mid, m in found if m is not None]
@@ -227,7 +333,8 @@ def hippo_retrieve(
         )
         relevance = _cosine_similarity(query_emb, mem_emb)
         name_bonus = NAME_MATCH_BONUS if _content_matches_names(m.get("content", ""), query_names) else 0.0
-        score = relevance_weight * relevance + (1 - relevance_weight) * _availability_score(availability) + name_bonus
+        bm25_bonus = BM25_MATCH_BONUS if mid in bm25_id_set else 0.0
+        score = relevance_weight * relevance + (1 - relevance_weight) * _availability_score(availability) + name_bonus + bm25_bonus
         candidates.append({
             **m,
             "id": mid,
