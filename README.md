@@ -20,11 +20,22 @@ category-branched, not a rough approximation of it):
 
 | System | avg F1 | top_k | Questions |
 |---|---|---|---|
+| NaiveRAG | **33.9%** | 10 | 1540 (10 conversations, all QA pairs) |
 | HippoVoice | **29.47%** | 10 | 1540 (10 conversations, all QA pairs) |
 | Mem0-style | 23.4% | 5 | 1540 (10 conversations, all QA pairs) |
 | A-MEM-style | 22.0% | 5 | 1540 (10 conversations, all QA pairs) |
-| Zep-style | queued | — | — |
-| NaiveRAG | queued | — | — |
+| Zep-style | re-running | 10 | — |
+
+**Read the NaiveRAG number carefully before quoting it in isolation.**
+NaiveRAG never forgets anything — no decay, no salience, every turn
+retained forever. On a small, static, 10-conversation benchmark that
+never grows large enough to cost anything, "keep everything, unweighted"
+wins on pure recall — exactly the regime this benchmark tests. The
+sharper comparison for what managed memory actually buys is the
+noise-contamination table further down (10% for HippoVoice vs. 30% for
+naive/Mem0-style retrieval): comparable-or-better recall at a third of
+the noise, not "wins every metric." See [BUGS.md](BUGS.md) for the full
+writeup.
 
 HippoVoice's original run (24.1%) finished 2026-07-11; Mem0-style's finished
 2026-08-31; A-MEM-style finished 2026-08-31 as well. HippoVoice's number was
@@ -50,9 +61,11 @@ have only ever been run at `top_k=5` — bumping HippoVoice's own retrieval
 budget to 10 was deliberately *not* applied as the shared harness default,
 specifically so it wouldn't silently make this table apples-to-oranges (see
 `scripts/run_full_locomo.py`'s comments). Re-running both baselines at
-`top_k=10` for a fully fair comparison is still open. NaiveRAG is still
-queued too — check [BUGS.md](BUGS.md) for what's actually confirmed versus
-what's pending.
+`top_k=10` for a fully fair comparison is in progress on Kaggle — check
+[BUGS.md](BUGS.md) for what's actually confirmed versus what's pending
+(both Mem0's rerun and Zep-style's first run are currently blocked on
+Kaggle's weekly GPU quota resetting, with checkpoint-resume already wired
+in so neither restarts from scratch once it does).
 
 **Zep-style** is a new local reimplementation of Graphiti's core algorithm
 (entity/fact-triple extraction into a temporal knowledge graph, with

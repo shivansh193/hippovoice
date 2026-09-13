@@ -1541,12 +1541,57 @@ Add to this list; don't fix silently in passing.
   `run_full_locomo.py --system hippovoice` confirmation run, the same way
   `top_k=10` and the category-4 QA-prompt fix were each confirmed for
   real before being trusted.
-- NaiveRAG and Zep-style's first full 1540-question runs, and Mem0-style/
-  A-MEM-style's re-runs at `top_k=10` for a fully matched comparison
-  (using the new `--top_k` flag on `run_full_locomo.py`), are in progress
-  on Kaggle as of this writing -- Kaggle's free tier caps concurrent GPU
-  kernels at 2, so these are queued two at a time rather than all four at
-  once. Results to be added here once they land.
+- **NaiveRAG confirmed at 33.9% avg F1 (top_k=10) -- higher than
+  HippoVoice's 29.47%, for an explainable reason, not a refutation.** It
+  never forgets anything (no decay, no salience), so on a small, static,
+  10-conversation benchmark that never grows large enough to punish an
+  unbounded store, pure recall wins -- exactly the regime this benchmark
+  tests. The noise-contamination table (10% for HippoVoice vs. 30% for
+  naive/Mem0-style retrieval) is the sharper comparison for what managed
+  memory actually buys: comparable-or-better recall at a third of the
+  noise, not "wins every metric." Mem0-style and A-MEM-style also skip
+  real forgetting, making them the more relevant comparison point than a
+  strawman with zero memory management at all.
+
+- **Zep-style and Mem0-style (top_k=10 rerun) are both real, long-running
+  jobs that hit a genuine Kaggle platform constraint: the free-tier
+  weekly GPU quota (30 hours) got exhausted mid-run, cancelling BOTH
+  concurrently-running kernels at the same instant and then refusing new
+  pushes outright ("Maximum weekly GPU quota of 30.00 hours reached").**
+  Real measured per-turn costs explain why these two specifically are the
+  expensive ones: Mem0-style ~9-10s/turn (LLM-based ADD/UPDATE/DELETE/NOOP
+  decision every turn), Zep-style ~20s/turn (entity+fact extraction plus
+  entity-resolution embedding calls every turn) -- against ~5,500 total
+  turns across the full 10-conversation set, Zep-style alone extrapolates
+  to ~25-30 hours, comfortably past a single Kaggle session's ~12h cap
+  even before the weekly quota is considered.
+
+  Real resume mechanism now wired in, not just "restart and hope": each
+  cancelled run's checkpoint (`locomo_checkpoint_full_<system>.json`,
+  written by `run_locomo()`'s own existing checkpoint/resume logic) does
+  survive into that kernel's Output tab despite the cancellation --
+  confirmed by downloading it directly (Mem0 at 1,035/1,540 questions,
+  Zep at 584/1,540). The reason resume wasn't happening automatically
+  across separate kernel pushes is that `/kaggle/working` doesn't persist
+  between distinct kernel version runs -- each fresh push starts in a
+  clean container with a fresh git clone, checkpoint included. Fixed the
+  same way the original mem0 top_k=5 run's own real Kaggle cancellation
+  was handled: uploaded each checkpoint as its own private Kaggle Dataset
+  (`hippovoice-mem0-checkpoint-resume`, `hippovoice-zep-checkpoint-resume`),
+  wired as a `dataset_sources` entry in each kernel's metadata, and added
+  a copy-if-not-already-present step to each kernel script (copies from
+  `/kaggle/input/<dataset>/...` to the exact path `run_locomo()` expects,
+  only when that path doesn't already exist, so a genuinely fresh run is
+  never silently short-circuited). Verified the fingerprint will actually
+  match on resume: both checkpoints' recorded commit (`717fbf9`) equals
+  the current repo HEAD, and no decay_lambda/relevance_weight/top_k/model
+  values have changed since either checkpoint was written.
+
+  **Blocked until the weekly GPU quota resets** -- pushing either kernel
+  right now fails immediately with the quota error above, before even
+  reaching the resume logic. Nothing is lost in the meantime: both
+  checkpoints are safely preserved as Kaggle Datasets independent of
+  quota state, ready to resume the moment a push succeeds again.
 - Weight-editing (ROME/MEMIT) still needs wiring into
   `scripts/run_full_locomo.py`'s `SYSTEMS` dict -- `kaggle_weightedit_only.
   ipynb` has a real, separate setup for it (different base model, GPT-2
