@@ -1532,6 +1532,45 @@ Add to this list; don't fix silently in passing.
   not a regression (those cases behave exactly as they did before this
   fix). 2 new tests, full suite clean.
 
+- **Confirmed: Mem0-style at matched `top_k=10` scores 29.11% -- a tie with
+  HippoVoice's 29.47%, not the ~6-point lead the earlier 23.4% comparison
+  suggested.** The 23.4% was a `top_k=5` run; re-run through the same
+  production harness at `top_k=10` (2026-09-21), Mem0-style finished with
+  bins near-zero/partial/high 865/401/274 against HippoVoice's 852/410/278.
+  Most of the apparent gap was the retrieval budget, not the architecture.
+
+  | Category (n) | NaiveRAG | HippoVoice | Mem0-style |
+  |---|---|---|---|
+  | 1 multi-hop (282) | 0.240 | 0.222 | 0.219 |
+  | 2 temporal (321) | 0.286 | 0.264 | 0.243 |
+  | 3 inferential (96) | 0.161 | 0.166 | 0.133 |
+  | 4 single-fact (841) | 0.413 | 0.346 | 0.352 |
+  | **overall (1540)** | **0.339** | **0.2947** | **0.2911** |
+
+  HippoVoice is ahead on categories 1-3 and marginally behind on 4; a 0.36
+  point overall gap is not something to claim as a win. Anything that quoted
+  "29.47% vs 23.4%" (outreach messages, the earlier primer drafts) is stale
+  and should use the matched number instead. The noise-contamination result
+  (10% vs 30%) is a separate benchmark and still stands as measured, but the
+  baselines were never re-measured after HippoVoice's own later fixes, so it
+  should be re-run on equal footing before being presented as settled.
+
+- **Resume-from-checkpoint on Kaggle failed silently twice before working --
+  two distinct causes, both fixed in the kernel scripts.** (1) The
+  checkpoint fingerprint includes the git commit, so a docs-only commit made
+  after the checkpoint was written made `run_locomo()` discard it and restart
+  from conversation 1; the kernel scripts now re-stamp the commit only when
+  every file changed since the checkpoint is a `.md` file, so a real code
+  change still refuses to resume. (2) A recreated kernel mounts attached
+  datasets under `/kaggle/input/datasets/<owner>/<name>/`, not the short path
+  a previous version used; the scripts now search `/kaggle/input`
+  recursively and print what they find. Both wasted runs were stopped within
+  minutes (about 0.2 GPU-hours) by deleting and recreating the kernels, since
+  the Kaggle CLI has no cancel command. Mem0 resumed at 7/10 conversations
+  and Zep at 4/10. Zep-style's early score (12.6% over 584 questions) is low
+  enough that it more likely reflects this simplified reimplementation than
+  Graphiti itself, and should be labelled that way wherever it is reported.
+
 ## Open
 
 - **Category 4's genuine retrieval misses -- BM25 seeding fix landed
