@@ -13,6 +13,33 @@ Benchmarked on real data. [LoCoMo](https://github.com/snap-research/locomo)
 has 10 long-term conversations, 369-689 turns each, with real ground-truth
 QA pairs. It's the same dataset Mem0, A-MEM, and MemoryBank report on.
 
+## What this project shows
+
+- **Recall on par with a Mem0-style system, at matched settings.** On the
+  full LoCoMo set (1,540 questions), HippoVoice scores 29.47% avg F1 and a
+  local reimplementation of Mem0's update algorithm scores 29.11%, same LLM,
+  same scorer, same retrieval budget (`top_k=10`). That is a tie, and the
+  README treats it as one.
+- **A different trade-off, not a higher score.** The architecture (decay,
+  emotion-weighted salience, a semantic/episodic split) is aimed at keeping
+  retrieved context clean as a memory store grows. On a separate synthetic
+  contamination benchmark it retrieves 10% irrelevant context against 30%
+  for Mem0-style and flat retrieval (caveats below). LoCoMo is too small to
+  punish an unbounded store, so it can't show that trade-off either way.
+- **Measurement you can check.** Every baseline is a local reimplementation
+  run through one harness, because published Mem0/Zep LoCoMo numbers use
+  different LLMs and lenient LLM-as-judge scoring (Zep alone has been
+  reported anywhere from 58% to 84% depending on who measured it). The largest early "lead"
+  turned out to be a retrieval-budget mismatch (`top_k=5` vs `10`); it was
+  found by re-running the baseline, not by a reviewer. `BUGS.md` records
+  that, and the three fixes that were tried and reverted after real
+  validation showed they didn't work.
+- **Voice, end to end.** The same memory system runs behind a real
+  audio-to-audio model (Qwen2.5-Omni): a fact stated in one spoken turn is
+  recalled correctly two turns later, after an unrelated turn in between, and a 40-question LoCoMo run
+  completed with zero errors (25.81% avg F1, two conversations). There is
+  also an interactive demo (`demo/track2_app.py`).
+
 ## Results
 
 **LoCoMo**, scored with the published methodology (stemmed token F1,
@@ -23,68 +50,35 @@ category-branched, not a rough approximation of it):
 | NaiveRAG | **33.9%** | 10 | 1540 (10 conversations, all QA pairs) |
 | HippoVoice | **29.47%** | 10 | 1540 (10 conversations, all QA pairs) |
 | Mem0-style | **29.11%** | 10 | 1540 (10 conversations, all QA pairs) |
-| Mem0-style (original run) | 23.4% | 5 | 1540 (superseded by the top_k=10 row above) |
 | A-MEM-style | 22.0% | 5 | 1540 (not yet re-run at top_k=10) |
-| Zep-style | re-running | 10 | — |
+| Zep-style | re-running | 10 | partial: see below |
 
-**Read the NaiveRAG number carefully before quoting it in isolation.**
-NaiveRAG never forgets anything — no decay, no salience, every turn
-retained forever. On a small, static, 10-conversation benchmark that
-never grows large enough to cost anything, "keep everything, unweighted"
-wins on pure recall — exactly the regime this benchmark tests. The
-sharper comparison for what managed memory actually buys is the
-noise-contamination table further down (10% for HippoVoice vs. 30% for
-naive/Mem0-style retrieval). That noise comparison is the claim the
-architecture is built around, but it is a separate, smaller synthetic
-benchmark whose baseline numbers pre-date HippoVoice's own later fixes, so
-it needs re-measuring on equal footing before it is quoted as settled. On
-raw LoCoMo recall HippoVoice is level with Mem0-style and below NaiveRAG.
-See [BUGS.md](BUGS.md) for the full writeup.
+Mem0-style was first measured at `top_k=5` (23.4%); that row is superseded by
+the matched `top_k=10` run above. Per category (multi-hop, temporal,
+inferential, single-fact) HippoVoice is slightly ahead on the first three and
+slightly behind on single-fact lookups; the table is in [BUGS.md](BUGS.md).
 
-HippoVoice's original run (24.1%) finished 2026-07-11; Mem0-style's finished
-2026-08-31; A-MEM-style finished 2026-08-31 as well. HippoVoice's number was
-then improved to 27.74% on 2026-09-05 via a real, validated Kaggle sweep
-(decay_lambda × relevance_weight × top_k) — `top_k=10` was the actual
-driver, confirmed on the full 1540-question set, with the whole score
-distribution shifting favorably, not just the mean (near-zero/partial/high
-bins: 877/431/232 at top_k=10, versus 966/379/195 at the original top_k=5).
+**NaiveRAG scores highest, and it's worth understanding why.** It never
+forgets anything: no decay, no salience, every turn kept forever. On a
+small, static, 10-conversation benchmark that never grows large enough to
+cost anything, "keep everything, unweighted" wins on raw recall. That is
+the regime this benchmark tests, and it says nothing about a store that
+grows for months. It is also the reason the contamination benchmark below
+matters more than the LoCoMo average for what this system is for.
 
-Then improved again to **29.47%** on 2026-09-07 via a category-4-specific
-QA prompt fix (`CATEGORY_4_QA_SYSTEM_PROMPT`), confirmed on a second full
-1540-question run: category 4 (the largest category, 55% of the whole
-benchmark) moved 31.4% → 34.6% avg F1, while categories 1/2/3/5 reproduced
-bit-for-bit identically to the prior run (a clean, deterministic
-confirmation that the fix is fully isolated to category 4, no
-cross-category side effects). Bins moved favorably again: 852/410/278.
-See [BUGS.md](BUGS.md) for the full sweep methodology, the category
-root-cause analysis, and three other fix attempts that were tried and
-honestly reverted after real validation showed they didn't help.
+**How HippoVoice's own number got here:** 24.1% at the original `top_k=5`,
+27.74% after a validated Kaggle sweep (`top_k=10` was the only variable that
+moved it), 29.47% after a category-4 answer-format fix that was confirmed on a
+second full run with the other four categories reproducing bit-for-bit.
+Details, including the bins, are in [BUGS.md](BUGS.md).
 
-**Matched comparison (2026-09-21).** Mem0-style re-run at `top_k=10`, the
-same retrieval budget as HippoVoice, scored **29.11%** against HippoVoice's
-**29.47%**: a statistical tie, not a lead. The earlier 23.4% was a `top_k=5`
-run, and most of the apparent gap between it and HippoVoice was the retrieval
-budget rather than the architecture. Per category HippoVoice is slightly ahead
-on multi-hop, temporal, and inferential questions and slightly behind on
-single-fact lookups (see [BUGS.md](BUGS.md) for the table). A-MEM-style is
-still only measured at `top_k=5` (22.0%), so treat that row as not yet
-comparable. Zep-style is mid-run: it resumes across Kaggle's session cutoffs
-from a checkpoint, and its early numbers are low enough that they more likely
-reflect this simplified local reimplementation than Graphiti itself.
-
-**Zep-style** is a new local reimplementation of Graphiti's core algorithm
-(entity/fact-triple extraction into a temporal knowledge graph, with
-deterministic edge invalidation on contradiction and hybrid
-semantic+BM25+graph-distance retrieval via Reciprocal Rank Fusion — see
-`baselines/zep_baseline.py`'s docstring for exactly what's faithfully
-reproduced versus simplified). It exists specifically because Zep's own
-published LoCoMo numbers aren't usable for a direct comparison here: Zep
-reported ~84%, Mem0's own replication of Zep scored it at 58.44% and
-alleged methodology errors, and Zep rebutted with 75.14% — three different
-numbers for the same system, depending entirely on who measured it and how.
-Same problem as Mem0/A-MEM: different LLM (GPT-4-class), different scoring
-(LLM-as-judge, not strict token-F1). Running it through this project's own
-identical harness is the only way to compare it fairly against HippoVoice.
+**Zep-style** is a local, simplified reimplementation of Graphiti's core
+algorithm (entity/fact-triple extraction into a temporal knowledge graph,
+edge invalidation on contradiction, semantic+BM25+graph-distance retrieval
+via Reciprocal Rank Fusion; `baselines/zep_baseline.py` documents what is
+faithful versus simplified). Its early scores are low enough that they more
+likely reflect that simplification than Graphiti itself, so any Zep-style
+number here should be read as "this reimplementation", not "Zep".
 
 There's also a smaller, synthetic benchmark (~90-100 turn conversations)
 for noise contamination: what fraction of retrieved context is actually
@@ -97,10 +91,13 @@ irrelevant.
 | NaiveRAG | 30% |
 | A-MEM-style | 10% |
 
-Worth being precise about this one: the Mem0/NaiveRAG/A-MEM numbers were
-measured against HippoVoice's earlier 20% result, not its current 10%.
-Baselines weren't rerun after the fix that got HippoVoice to 10%, so
-don't read that row as five numbers from one simultaneous run.
+Worth being precise about this one: the baseline numbers were measured
+against HippoVoice's earlier 20% result, not its current 10%, and the
+baselines weren't rerun after the fix, so don't read it as five numbers
+from one simultaneous run. A-MEM-style also matches HippoVoice here, so the
+honest summary is "clean retrieval is achievable without full decay
+machinery", and separating the two on this benchmark needs a larger store
+than 90 turns.
 
 BUGS.md has the full history: what got tried, what broke, how each
 number was actually verified rather than assumed. It reads more like a
