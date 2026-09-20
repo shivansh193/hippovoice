@@ -22,8 +22,9 @@ category-branched, not a rough approximation of it):
 |---|---|---|---|
 | NaiveRAG | **33.9%** | 10 | 1540 (10 conversations, all QA pairs) |
 | HippoVoice | **29.47%** | 10 | 1540 (10 conversations, all QA pairs) |
-| Mem0-style | 23.4% | 5 | 1540 (10 conversations, all QA pairs) |
-| A-MEM-style | 22.0% | 5 | 1540 (10 conversations, all QA pairs) |
+| Mem0-style | **29.11%** | 10 | 1540 (10 conversations, all QA pairs) |
+| Mem0-style (original run) | 23.4% | 5 | 1540 (superseded by the top_k=10 row above) |
+| A-MEM-style | 22.0% | 5 | 1540 (not yet re-run at top_k=10) |
 | Zep-style | re-running | 10 | — |
 
 **Read the NaiveRAG number carefully before quoting it in isolation.**
@@ -33,9 +34,12 @@ never grows large enough to cost anything, "keep everything, unweighted"
 wins on pure recall — exactly the regime this benchmark tests. The
 sharper comparison for what managed memory actually buys is the
 noise-contamination table further down (10% for HippoVoice vs. 30% for
-naive/Mem0-style retrieval): comparable-or-better recall at a third of
-the noise, not "wins every metric." See [BUGS.md](BUGS.md) for the full
-writeup.
+naive/Mem0-style retrieval). That noise comparison is the claim the
+architecture is built around, but it is a separate, smaller synthetic
+benchmark whose baseline numbers pre-date HippoVoice's own later fixes, so
+it needs re-measuring on equal footing before it is quoted as settled. On
+raw LoCoMo recall HippoVoice is level with Mem0-style and below NaiveRAG.
+See [BUGS.md](BUGS.md) for the full writeup.
 
 HippoVoice's original run (24.1%) finished 2026-07-11; Mem0-style's finished
 2026-08-31; A-MEM-style finished 2026-08-31 as well. HippoVoice's number was
@@ -56,16 +60,17 @@ See [BUGS.md](BUGS.md) for the full sweep methodology, the category
 root-cause analysis, and three other fix attempts that were tried and
 honestly reverted after real validation showed they didn't help.
 
-**Read the top_k column before comparing rows.** Mem0-style and A-MEM-style
-have only ever been run at `top_k=5` — bumping HippoVoice's own retrieval
-budget to 10 was deliberately *not* applied as the shared harness default,
-specifically so it wouldn't silently make this table apples-to-oranges (see
-`scripts/run_full_locomo.py`'s comments). Re-running both baselines at
-`top_k=10` for a fully fair comparison is in progress on Kaggle — check
-[BUGS.md](BUGS.md) for what's actually confirmed versus what's pending
-(both Mem0's rerun and Zep-style's first run are currently blocked on
-Kaggle's weekly GPU quota resetting, with checkpoint-resume already wired
-in so neither restarts from scratch once it does).
+**Matched comparison (2026-09-21).** Mem0-style re-run at `top_k=10`, the
+same retrieval budget as HippoVoice, scored **29.11%** against HippoVoice's
+**29.47%**: a statistical tie, not a lead. The earlier 23.4% was a `top_k=5`
+run, and most of the apparent gap between it and HippoVoice was the retrieval
+budget rather than the architecture. Per category HippoVoice is slightly ahead
+on multi-hop, temporal, and inferential questions and slightly behind on
+single-fact lookups (see [BUGS.md](BUGS.md) for the table). A-MEM-style is
+still only measured at `top_k=5` (22.0%), so treat that row as not yet
+comparable. Zep-style is mid-run: it resumes across Kaggle's session cutoffs
+from a checkpoint, and its early numbers are low enough that they more likely
+reflect this simplified local reimplementation than Graphiti itself.
 
 **Zep-style** is a new local reimplementation of Graphiti's core algorithm
 (entity/fact-triple extraction into a temporal knowledge graph, with
@@ -206,9 +211,11 @@ a second, self-hosted backend (`Qwen25OmniAudioModel`, Qwen2.5-Omni-3B)
 was validated instead: after fixing four real bugs surfaced only by
 running the full pipeline on a GPU (see `BUGS.md`), a complete 40-question
 LoCoMo run finished with **25.81% avg F1** (text-out only, `return_audio=
-False`) -- comparable to Track 1's own text-only Mem0-style baseline
-(23.4%) despite going through a full TTS -> Qwen2.5-Omni -> transcript
-round trip rather than reading text directly.
+False`). That run covers 2 of LoCoMo's 10 conversations, so it is not
+directly comparable to Track 1's full-set numbers (29.47% HippoVoice,
+29.11% Mem0-style at matched settings); the point of it was that the full
+TTS -> Qwen2.5-Omni -> transcript round trip works end to end without
+errors, not a head-to-head score.
 
 Real audio OUTPUT (not just text) needed a bigger GPU: a single T4 had
 just enough headroom for the model itself but not also for real-length
